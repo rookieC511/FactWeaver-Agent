@@ -78,3 +78,23 @@ data/
 public/charts/
 logs/
 .langchain.db
+
+# Legacy / Archive
+legacy/debug_screenshots/
+legacy/old_benchmark_repo/
+legacy/data/
+
+# Test output / dirty run artifacts
+test_llama_output.txt
+test_llama_time.txt
+test_report_eval.txt
+test_result.txt
+*.db
+*.sqlite
+
+# DeepEval telemetry
+.deepeval/
+
+# Screenshots
+*.png
+pic/
