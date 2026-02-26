@@ -98,3 +98,9 @@ test_result.txt
 # Screenshots
 *.png
 pic/
+
+# Generated research outputs (runtime artifacts)
+deep_research_*.md
+project_report.md
+deep_research_db*/
+deep_research_persistent*/
