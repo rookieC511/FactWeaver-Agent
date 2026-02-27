@@ -1,12 +1,13 @@
-# 🔍 Lexplore-Agent: Industrial-Grade Deep Research System
+# 🔍 FactWeaver-Agent: Industrial-Grade Deep Research System
 
 [![LangGraph](https://img.shields.io/badge/LangGraph-Multi--Agent-blue)](https://python.langchain.com/docs/langgraph)
-[![Local LLM](https://img.shields.io/badge/Local_LLM-Llama--3-orange)]()
+[![Local LLM](https://img.shields.io/badge/Local_LLM-Llama--3.1-orange)]()
 [![Cost Optimization](https://img.shields.io/badge/API_Cost--70%25-green)]()
+[![Rolling Snapshot](https://img.shields.io/badge/V2.0-Rolling_Snapshot-purple)]()
 
-> A production-ready Multi-Agent Deep Research framework built on LangGraph. Designed to eliminate the "Logical Slicing" problem in traditional RAG systems while reducing API costs by 70% through dynamic Model Routing.
+> A production-ready Multi-Agent Deep Research framework built on LangGraph. Features **V2.0 Rolling Snapshot Compression** that boosts fact extraction recall by 177% while keeping VRAM stable.
 >
-> 专为解决复杂长文本研判而生的工业级多智能体深度调研系统。彻底摒弃传统 RAG 的向量切片断层问题，通过本地小模型动态路由与上下文物理截断，实现 70% 的 API 成本骤降。
+> 专为解决复杂长文本研判而生的工业级多智能体深度调研系统。V2.0 滚动快照压缩架构将事实召回率提升 177%，彻底消除 "中间遗忘" 效应，通过本地小模型动态路由实现 70% 的 API 成本骤降。
 
 ## 🎯 The Problem We Solve (核心痛点)
 
@@ -17,11 +18,11 @@ In traditional Deep Research tasks, typical Agent architectures fail due to thre
 
 ## 🚀 Core Architecture (核心架构突破)
 
-Lexplore-Agent adopts a **Planner-Actor-Critic** topology via LangGraph, with several industrial-grade optimizations:
+FactWeaver-Agent adopts a **Planner-Actor-Critic** topology via LangGraph, with several industrial-grade optimizations:
 
-* **Zero-Slice Full Text Extraction (去切片化全文本提纯):** We completely removed vector DBs. Instead, we use high-density Regex cleaning combined with a **25,000-character physical truncation valve**, preserving intact logical chains for deep reading.
+* **V2.0 Rolling Snapshot Compression (滚动快照压缩):** Long documents are split into ~6K-char chunks and processed sequentially. Each chunk carries a compressed **memory snapshot** from prior chunks, keeping the LLM locked within its optimal 8K-token window. This eliminates the "Lost in the Middle" effect that plagued V1.0's single-shot 25K truncation.
 * **Dynamic Size-Model Routing (大小模型算力路由):**
-  Heavy-lifting extraction tasks are offloaded to a local, zero-cost **Llama-3** (via Ollama) node. Only the final synthesis is routed to premium APIs, resulting in a **>70% reduction in API costs**.
+  Heavy-lifting extraction tasks are offloaded to a local, zero-cost **Llama-3.1** (via Ollama) node. Only the final synthesis is routed to premium APIs (DeepSeek-R1), resulting in a **>70% reduction in API costs**.
 * **Phoenix Crawler Fallback (不死鸟兜底机制):**
   Primary fetching via Jina AI. If blocked or timed out, it instantly falls back to a custom `BeautifulSoup` scraper, ensuring 100% data flow continuity.
 * **Self-Correction & Traceability (防幻觉溯源):**
@@ -30,16 +31,17 @@ Lexplore-Agent adopts a **Planner-Actor-Critic** topology via LangGraph, with se
 ## 🛠️ Tech Stack (技术栈)
 
 - **Orchestration:** LangGraph (State Machine & Time Travel)
-- **Local Routing Node:** Ollama (Llama-3)
-- **Extraction & Fallback:** Jina AI, BeautifulSoup, Regex Truncation
+- **Memory Engine:** Rolling Snapshot Compression (`memory.py`)
+- **Local Routing Node:** Ollama (Llama-3.1 8B)
+- **Extraction & Fallback:** Jina AI, BeautifulSoup, Regex Cleaning
 - **Eval Pipeline:** Automated local judging aligned with DeepSearchQA standards.
 
 ## ⚡ Quick Start (极速启动)
 
 1. Clone the repository & Install dependencies
 ```bash
-git clone https://github.com/yourusername/lexplore-agent.git
-cd lexplore-agent
+git clone https://github.com/rookieC511/FactWeaver-Agent.git
+cd FactWeaver-Agent
 pip install -r requirements.txt
 ```
 
@@ -50,23 +52,35 @@ OPENAI_API_KEY=your_key
 JINA_API_KEY=your_key
 ```
 
-3. Fire up the local Llama-3 extraction node
+3. Fire up the local Llama-3.1 extraction node
 
 ```bash
-ollama run llama3
+ollama run llama3.1
 ```
 
-4. Run the benchmark / smoke test
+4. Run the baseline evaluation
 
 ```bash
-python run_benchmark.py --smoke --limit 3
+python eval/v1_baseline.py --cases 5
 ```
+
+## 📊 Benchmark Results: V1.0 → V2.0 A/B Comparison
+
+| Metric | V1.0 (单次截断) | V2.0 (滚动快照) | Improvement |
+|--------|-----------------|-----------------|-------------|
+| **Recall** | 23.7% | **65.7%** | **+177% 🚀** |
+| **Needle Hit Rate** | 1/5 (20%) | **4/5 (80%)** | +300% |
+| **Precision** | 70.0% | 59.6% | -15% |
+| **VRAM Peak** | ~6650 MiB | ~6420 MiB | -3.5% |
+
+> Tested on NVIDIA GeForce RTX 4070 Laptop GPU (8GB) with 5 synthetic smoke test cases (~20K chars each, with planted needle facts).
 
 ## 📈 Roadmap (后续计划)
 
-* [ ] DeepSearchQA authoritative benchmark alignment (In progress)
+* [x] V2.0 Rolling Snapshot Compression (Recall +177%)
+* [ ] V2.1 Latency Optimization (Map-Reduce parallelization / adaptive chunk sizing)
+* [ ] DeepSearchQA authoritative benchmark alignment
 * [ ] Checkpoint integration for Human-in-the-loop review
-* [ ] Shuru (Ephemeral Sandboxing) integration for code execution
 
 ---
 

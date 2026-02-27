@@ -3,125 +3,62 @@
 This file contains critical context for AI assistants working on this project. **Read this first.**
 
 ## 1. Environment & Execution
-- **Python Environment**: `agent_env`
-- **Path**: `F:\Conda_Envs\agent_env` (Windows)
-- **Execution Command**:
-  ```powershell
-  # DO NOT use 'conda run' or 'python'. Use the absolute path to avoid environment issues.
-  F:\Conda_Envs\agent_env\python.exe main.py
-  ```
-- **Benchmark Command (Data Flywheel)**:
-  ```powershell
-  # Start the benchmark to generate SFT data. Running in background.
-  F:\Conda_Envs\agent_env\python.exe run_benchmark.py
-  ```
+- **Python**: `F:\Conda_Envs\agent_env\python.exe`（**必须用绝对路径**，不要用 `conda run` 或 `python`）
 - **Working Directory**: `D:\Projects\deepresearch-agent`
+- **运行**: `F:\Conda_Envs\agent_env\python.exe main.py`
+- **Benchmark**: `F:\Conda_Envs\agent_env\python.exe run_benchmark.py`
 
 ## 2. Project Status
-- **Current Phase**: Phase 4 Complete (Report Generation + Charts).
-- **Localization**: Simplified Chinese (Output, Logs, Reports).
-- **Key Features**:
-  - **Interactive Review**: User can modify the outline during execution via console input.
-  - **Chief Editor Synthesis**: `writer_graph.py` features a Chief Editor node (`editor_node`) powered by LLM to rewrite fragmented drafted sections into highly cohesive, professional academic reports with guaranteed `Abstract`, `Conclusion`, and precise `[hash]` citation preservation.
-  - **Charts**: Uses `matplotlib`/`seaborn` with Chinese font support (`SimHei`).
-  - **Browsing**: Uses `Jina` and `GLM-4V` for visual browsing. Supports automatic screenshot verification and insertion.
+- **Phase**: Phase 4 Complete (Report Generation + Charts)
+- **Localization**: Simplified Chinese (输出、日志、报告)
+- **GitHub**: [rookieC511/FactWeaver-Agent](https://github.com/rookieC511/FactWeaver-Agent) (Public, `main` branch)
 
-## 3. Key Files Structure
-- `main.py`: Entry point. Sets up asyncio loop for Windows.
-- `graph.py`: Main state graph (Planner -> Executor -> Reviewer).
-- `writer_graph.py`: Sub-graph for writing reports (Skeleton -> Human Review -> Writers -> Charts).
-- `charts.py`: Chart generation logic. **Crucial**: Contains Chinese font config.
-- `docs/`: Contains development logs and artifacts.
-- `public/charts/`: Output directory for generated charts.
-- `legacy/`: Archived scripts and logs.
+## 3. Key Files
+| 文件 | 职责 |
+|------|------|
+| `main.py` | 入口，Windows asyncio 兼容 |
+| `graph.py` | 主状态图 (Planner → Executor → Reviewer) |
+| `writer_graph.py` | 写作子图 (Skeleton → Human Review → Writers → Chief Editor → Charts) |
+| `charts.py` | 图表生成，含中文字体配置 (`SimHei`) |
+| `memory.py` | Long Context Fact Extraction（已弃用 Qdrant，改用 LLM 直接提取事实块） |
+| `tools.py` | 搜索/爬虫，含 Jina + BeautifulSoup Phoenix 降级 |
+| `models.py` | 所有 LLM 实例定义 |
+| `config.py` | 模型名称与 API 配置 |
 
 ## 4. Critical Technical Details
-- **Image Paths**: When embedding images in Markdown, use **relative paths** (e.g., `./public/charts/filename.png`) so they render in VS Code.
-- **Chinese Fonts**: `charts.py` sets `plt.rcParams['font.sans-serif'] = ['SimHei', ...]` to prevent "Tofu" characters.
-- **Interactive Input**: The `human_review_node` in `writer_graph.py` uses `input()` to capture user feedback.
+- **Image Paths**: Markdown 中用**相对路径** (`./public/charts/filename.png`)
+- **Chinese Fonts**: `charts.py` 设 `plt.rcParams['font.sans-serif'] = ['SimHei', ...]`
+- **Interactive Input**: `writer_graph.py` 的 `human_review_node` 使用 `input()` 交互
 
 ## 5. Interaction Rules
-- **Language**: All communication with the user (chat, notifications, etc.) MUST be in **Simplified Chinese (简体中文)**. Documentation and code can remain in English where standard.
-- **Memory**: Always record key architectural decisions and completed tasks in this file or `task.md`.
+- **语言**: 与用户的所有沟通**必须使用简体中文**。代码和文档可保持英文。
+- **记忆同步**: 关键架构决策必须追加到本文件。
 
-## 6. Development Log (Condensed)
-
-### [2026-02-03] Evaluation & Testing
-- Built local QA evaluation harness using `pytest` and `deepeval`.
-- Verified "Real Agent" functionality with `verify_llm.py` (DeepSeek-V3 + Tavily).
-
-### [2026-02-14] GAIA & Optimization
-- Fixed `UnicodeEncodeError` and `asyncio` loop issues on Windows.
-- **GAIA Real Benchmark**: Passed 5/5 Level 2 tasks (Paper Search, Zip Code, Calc, Code, Mollusk).
-- **Stress Test**: Passed LongBench (MultiNews, 180k tokens) with "Distributed Planning & Writing".
-
-### [2026-02-16] Data Flywheel & Llama-3 SFT
-- **Objective**: Generate high-quality SFT data (Llama-3 Format) via `run_benchmark.py`.
-- **Optimizations**:
-  - **CoT**: Wrapped Planner thoughts in `<|begin_of_thought|>`.
-  - **Intent**: Annotated search queries with intent descriptions.
-  - **No-Data-Left-Behind**: Saving all trajectories (`score=None`).
-- **Fixes**: Resolved `ImportError` (path conflict) and `browser-use` dependency issues.
-- **Status**:
-  - Benchmark **COMPLETE**.
-  - All 100 official tasks generated.
-
-### [2026-02-22] SFT Data Curation & Citation Preservation
-- **Objective**: Generate and filter high-quality SFT samples (DPO pos/neg pairs) via `local_judge.py` using SiliconFlow (DeepSeek-V3.2).
-- **Issue**: Initial Chief Editor prompt generated high-quality structure but stripped explicit Markdown URLs (`[source](https...)`), only leaving `[hash]` labels which dropped link density.
-- **Fixes**:
-  - **Context Augmentation**: Modified `section_writer_node` in `writer_graph.py` to pass the actual URL to the writer LLM, instructing it to strictly output standard markdown links `[Source Name](URL)`.
-  - **Prompt Hardening**: Heavily emphasized the `PRESERVE ALL URLs AND CITATIONS` rule in the `editor_node` prompt.
-  - **Fallback Scripting**: Added a regex fallback in `editor_node` to globally extract `[text](url)` from the raw drafted sections and automatically append them to `## 4. References` if the LLM drops them.
-- **Result**: Successfully ran an end-to-end `test_single_generation.py` using real Serper search. Scored 9.0/10.0 from the local LLM Judge with perfect citation density and Markdown URL retention. Ready for large-scale data generation.
-- **Agent LLMOps 4道防线 SOP**: 构建了严密的评测拦截防线以告别“脚本时代”黑盒抓瞎：
-  - **防线一：冒烟测试**。新增 `data/prompt_data/smoke_query.jsonl` 作为黄金测试集。并在 `writer_graph.py` 内部节点打印 `[Writer x 提纯结果]` -> `[Chief Editor 最终合成]` 的明确链路和字符统计。
-  - **防线二：质量门禁 (Quality Gate)**。在 `run_benchmark.py` 运行时直接引入本地打分 `get_llm_structure_score`，开启熔断机制。如连续 3 题得分 < 6，脚本级立刻 `sys.exit()`，节省 API 花费。
-  - **防线三：状态隔离**。对运行产生的数据进行版本控制。废旧脏数据打上 `submission_v1_stitched_bad.jsonl` 标签隔离。最新加入 Chief Editor 后的高质量数据输出为 `submission_v2_chief_editor.jsonl`。
-  - **防线四：Prompt Unit Test**。新增 `test_editor.py` 测试节点对恶意重复数据的去重能力与 Markdown URL 的健壮性保留。
-
-### [2026-02-23] Onyx 架构逆向工程深度分析
-
-**背景**: 对 DeepResearch Bench 榜单第一的 Onyx 系统进行了深度源码剖析（核心文件：`dr_loop.py` 和 `research_agent.py`）。完整分析报告见 `_references/onyx/`（克隆的 Onyx 原始仓库，已加入 `.gitignore`）。
-
-**核心架构三大发现**:
-
-1. **无复杂图引擎** - Onyx 用纯 Python `for/while` 循环实现所有编排，完全不依赖 LangGraph 等框架。循环上限为 8 次 (Orchestrator) / 8 次 (Sub-Agent)，同时有严格的墙上时钟超时（Orchestrator: 30 分钟, Sub-Agent: 12 分钟）作为兜底。
-
-2. **LLM Chat History 即 State** - 不维护复杂 State Dict。所有 Sub-Agent 返回的事实块（Fact Blocks）直接作为 `TOOL_CALL_RESPONSE` 消息 `.append()` 到主 Orchestrator 的对话历史中。依赖现代模型 128k+ 上下文窗口（入口处硬性过滤 `< 50000 token` 的模型）。Sub-Agent 的输出限制在 10000 token 以内。
-
-3. **完美 Map-Reduce 隔离** - 多个 Sub-Agent (Map) 并行在各自的 `while` 循环内搜索网页，只向外吐出"无格式纯事实清单"（带引用标记）。当所有 Sub-Agent 完成或 Orchestrator 调用 `GENERATE_REPORT_TOOL` 时，独立的 Chief Editor (Reduce) 接管，拿到全局大纲 + 所有事实块，在 5 分钟超时 / 20000 token 额度内合成最终报告。
-
-**Skills 机制（Onyx 的另一条产品线）**: Onyx 的 `skill` 不用于 Deep Research，而是用于其 OpenCode 沙盒智能体。每个 Skill 是一个带 YAML frontmatter 的 `SKILL.md` 文件，由 `agent_instructions.py` 扫描后拼接进全局 `AGENTS.md` System Prompt。本质是"详细人类操作手册"直接注入 LLM 上下文。
-
-**对我们 LangGraph 架构的三条行动建议 (已修正)**:
-1. ✅ 废弃传递原始文档，改传轻量 Facts（**已完成**: `section_writer_node` 已在节点内部消化文档，只向 State 吐出纯文本事实块）。
-2. ⚠️ `while + time.monotonic()` 应只用于**节点内部**的密集重试循环，不应替展图级别的 Conditional Edge。我们的 LangGraph Conditional Edge 已经是实现宏观编排能力的最佳方式（支持 Checkpoint、可视化、状态层隔离）。
-3. ❌ **不适用**编成 BaseMessage History。我们的 `sections: Annotated[Dict, operator.ior]` 支持多个 writer 并行 Fan-out/Fan-in，Onyx 的单线程架构做不到这一点。我们的并行写作架构更先进，不应倒退。
-
-### [2026-02-23] Long Context RAG & Cost Optimization
-- **RAG Architecture Upgrade**: 
-  - Deprecated `Qdrant` vector storage for document chunking.
-  - Implemented a "Long Context Fact Extraction" approach in `memory.py` using `fact_blocks`. Full scraped text is now fed to an LLM to distill high-density summary blocks (`Markdown` with preserved citations) directly.
-- **Scraper Robustness (Phoenix Protocol)**:
-  - Enhanced `scrape_jina_ai` in `tools.py` with a fallback mechanism using `requests` and `BeautifulSoup` to parse `<p>`, `<h1>` tags locally when Jina hits 403/429 errors or returns empty content (e.g., Bloomberg, McKinsey).
-- **Cost Control & API Routing**:
-  - **Token Compression**: Implemented strict 25,000 character truncation (contains executive summaries/key data) and regex whitespace removal in `memory.py` before sending HTML text to the LLM.
-  - **Lightning API / Local Routing**: Recognized "Fact Extraction" as a "Blue-Collar Task". Swapped the expensive `DeepSeek-V3` model for a blazing-fast local `llama3.1:latest` via `Ollama` (`MODEL_EXTRACTOR` in `config.py`) to reduce fact extraction costs to practically $0 while maintaining <10s inference speed for 15k+ context.
-
-### [2026-02-23] High-Low LLM Routing (模型分工路由表)
+## 6. LLM Routing (模型分工路由表)
 
 > [!IMPORTANT]
-> 以下为当前生效的模型分工表，所有节点对应的模型实例定义在 `models.py`，模型名称配置在 `config.py`。
+> 模型实例定义在 `models.py`，名称配置在 `config.py`。
 
 | 角色 | 变量名 | 模型 | 用途 | 成本 |
 |------|--------|------|------|------|
-| 🧠 Planner | `llm_smart` | `deepseek-ai/DeepSeek-R1` | 拆解搜索任务、生成大纲 | API (SiliconFlow) |
-| 📖 Fact Extractor | `llm_extractor` | `llama3.1:latest` (Ollama) | 阅读网页全文，提取数据事实 | **$0 (本地)** |
-| ✍️ Section Writer | `llm_worker` | `pro/zai-org/glm-4.7.online` | 并行撰写各章节初稿 | API (SiliconFlow, 低价) |
-| 👔 Chief Editor | `llm_chief` | `deepseek-ai/DeepSeek-R1` | 最终合成全文、润色引用 | API (SiliconFlow) |
-| 👁️ Vision | `llm_vision` | `Pro/zai-org/GLM-4.7` | 图像分析 | API (SiliconFlow) |
-| ⚡ Fast (Legacy) | `llm_fast` | `deepseek-ai/DeepSeek-V3.2` | 通用快速任务 (备用) | API (SiliconFlow) |
+| 🧠 Planner | `llm_smart` | `deepseek-ai/DeepSeek-R1` | 拆解任务、生成大纲 | API (SiliconFlow) |
+| 📖 Fact Extractor | `llm_extractor` | `llama3.1:latest` (Ollama) | 阅读网页提取事实 | **$0 (本地)** |
+| ✍️ Section Writer | `llm_worker` | `pro/zai-org/glm-4.7.online` | 并行撰写章节初稿 | API (低价) |
+| 👔 Chief Editor | `llm_chief` | `deepseek-ai/DeepSeek-R1` | 全文合成、润色引用 | API |
+| 👁️ Vision | `llm_vision` | `Pro/zai-org/GLM-4.7` | 图像分析 | API |
+| ⚡ Fast (Legacy) | `llm_fast` | `deepseek-ai/DeepSeek-V3.2` | 通用快速任务 (备用) | API |
+
+## 7. Development Log (Condensed)
+
+- **[02-03]** 构建本地 QA 评测 (`pytest` + `deepeval`)，验证 DeepSeek-V3 + Tavily 基本能力。
+- **[02-14]** 修复 Windows `UnicodeEncodeError`/`asyncio` 问题。GAIA Benchmark 5/5 Level 2 通过；LongBench 压力测试 180k tokens 通过。
+- **[02-16]** Data Flywheel: 通过 `run_benchmark.py` 生成全部 100 题 Llama-3 格式 SFT 数据（CoT 标注 + Intent 标注）。
+- **[02-22]** Citation Preservation: 修复 Chief Editor 丢链接问题（Context Augmentation + Prompt Hardening + Regex Fallback）。LLM Judge 评分 9.0/10.0。构建 4 道 LLMOps 防线 SOP（冒烟测试 → 质量门禁熔断 → 状态隔离 → Prompt Unit Test）。
+- **[02-23]** **Onyx 逆向分析**: 榜一系统用纯 Python 循环编排（无 LangGraph），Chat History 即 State，Map-Reduce 隔离。**我们的结论**: ✅ 改传轻量 Facts（已完成）；⚠️ 保留 LangGraph Conditional Edge 做宏观编排；❌ 不改用 BaseMessage History（我们的并行 Fan-out/Fan-in 更强）。
+- **[02-23]** **架构升级**: 弃用 Qdrant → Long Context Fact Extraction (`memory.py`)；Phoenix Protocol 爬虫降级 (`tools.py`)；Fact Extraction 路由到本地 Llama-3 (成本 $0)。
+- **[02-27]** **GitHub Push ✅**: 品牌名 FactWeaver-Agent。3 轮 `filter-branch` 清除历史敏感/大文件后 force push 成功。**⚠️ 教训**: Git 历史清理前先 `git rev-list --objects --all` 全量扫描，做完清单再一刀切。
+- **[02-27]** **V1.0 Baseline 体检报告 ✅**: 新增独立 `eval/` 评测模块（5 组合成 Smoke Test，三维指标: Recall / Precision / Latency+VRAM）。结果: Recall **23.7%**, Needle 命中率 **1/5 (20%)**（Lost-in-the-Middle 量化确认），Precision **70%**, VRAM 峰值 **6.6GB** (RTX 4070 8GB 接近 OOM)。此数据直接驱动 V2.0 滚动窗口重构决策。
+- **[02-28]** **V2.0 滚动快照压缩 ✅**: 重构 `memory.py` — `aadd_document()` 改为 4-chunk 滚动窗口提取（6K 字符/块 + memory_snapshot 累积压缩）。A/B 对比: Recall **23.7% → 65.7% (+177%)**, Needle 命中率 **1/5 → 4/5**, VRAM 峰值略降至 6.4GB。零侵入 `graph.py`。
 
 ---
 
