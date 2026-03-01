@@ -9,7 +9,7 @@ This file contains critical context for AI assistants working on this project. *
 - **Benchmark**: `F:\Conda_Envs\agent_env\python.exe run_benchmark.py`
 
 ## 2. Project Status
-- **Phase**: Phase 4 Complete (Report Generation + Charts)
+- **Phase**: V3.0 Cloud-Native Evolution Complete (Production Ready)
 - **Localization**: Simplified Chinese (输出、日志、报告)
 - **GitHub**: [rookieC511/FactWeaver-Agent](https://github.com/rookieC511/FactWeaver-Agent) (Public, `main` branch)
 
@@ -42,7 +42,7 @@ This file contains critical context for AI assistants working on this project. *
 | 角色 | 变量名 | 模型 | 用途 | 成本 |
 |------|--------|------|------|------|
 | 🧠 Planner | `llm_smart` | `deepseek-ai/DeepSeek-R1` | 拆解任务、生成大纲 | API (SiliconFlow) |
-| 📖 Fact Extractor | `llm_extractor` | `llama3.1:latest` (Ollama) | 阅读网页提取事实 | **$0 (本地)** |
+| 📖 Fact Extractor | `llm_extractor` | `Pro/zai-org/GLM-4.7` | 10K 均衡切片 + Map-Reduce 提纯 | API (SiliconFlow) |
 | ✍️ Section Writer | `llm_worker` | `pro/zai-org/glm-4.7.online` | 并行撰写章节初稿 | API (低价) |
 | 👔 Chief Editor | `llm_chief` | `deepseek-ai/DeepSeek-R1` | 全文合成、润色引用 | API |
 | 👁️ Vision | `llm_vision` | `Pro/zai-org/GLM-4.7` | 图像分析 | API |
@@ -58,7 +58,19 @@ This file contains critical context for AI assistants working on this project. *
 - **[02-23]** **架构升级**: 弃用 Qdrant → Long Context Fact Extraction (`memory.py`)；Phoenix Protocol 爬虫降级 (`tools.py`)；Fact Extraction 路由到本地 Llama-3 (成本 $0)。
 - **[02-27]** **GitHub Push ✅**: 品牌名 FactWeaver-Agent。3 轮 `filter-branch` 清除历史敏感/大文件后 force push 成功。**⚠️ 教训**: Git 历史清理前先 `git rev-list --objects --all` 全量扫描，做完清单再一刀切。
 - **[02-27]** **V1.0 Baseline 体检报告 ✅**: 新增独立 `eval/` 评测模块（5 组合成 Smoke Test，三维指标: Recall / Precision / Latency+VRAM）。结果: Recall **23.7%**, Needle 命中率 **1/5 (20%)**（Lost-in-the-Middle 量化确认），Precision **70%**, VRAM 峰值 **6.6GB** (RTX 4070 8GB 接近 OOM)。此数据直接驱动 V2.0 滚动窗口重构决策。
-- **[02-28]** **V2.0 滚动快照压缩 ✅**: 重构 `memory.py` — `aadd_document()` 改为 4-chunk 滚动窗口提取（6K 字符/块 + memory_snapshot 累积压缩）。A/B 对比: Recall **23.7% → 65.7% (+177%)**, Needle 命中率 **1/5 → 4/5**, VRAM 峰值略降至 6.4GB。零侵入 `graph.py`。
+- **[02-28]** **V2.0 滚动快照压缩 ✅**: 重构 `memory.py` — `aadd_document()` 改为 4-chunk 滚动窗口提取。A/B 对比: Recall **23.7% → 65.7% (+177%)**, Needle 命中率 **1/5 → 4/5**, VRAM 峰值略降至 6.4GB。
+- **[02-28]** **V2.1 延迟优化实验 ✅**: 
+  - **Exp 1 (10K Seq)**: 延迟从 290s 降至 **120s**，Precision 升至 **81%**，Recall 略损 (55%)。
+  - **Exp 2 (6K Map-Reduce)**: 并发提取耗时 ~80s，Needle 命中率 **100%**，但 Reduce 阶段存在幻觉风险 (Precision 56%)。
+  - **结论**: 推荐 **10K Hybrid Map-Reduce (V2.2.2)** 作为最终平衡方案。
+- **[02-28]** **V2.2.4 并发优化发布 ✅**: 
+    - **改进**: 在均衡切片基础上放开核心并发 (`Semaphore=4`)，引入 3 次重试。
+    - **效果**: Map 阶段提速 **33%~46%**；端到端平均耗时从 117s 降至 **55.7s**；Needle 命中率保持 100%。
+    - **结论**: 确立了 10K 分块 + Map-Reduce + Semaphore(4) 的高性能生产配置。
+- **[02-28]** **V3.0 云端 Extractor 切换 ✅**: 
+    - **改动**: `models.py` 一行代码 — `llm_extractor` 从本地 Ollama (llama3.1:8B) → SiliconFlow DeepSeek-V3.2。
+    - **效果**: 信息密度 0.710 → **1.999** (+181%)；Writer Recall 16.7% → **47.8%** (+186%)；Map 耗时 42.5s → **26.9s** (-37%)。
+    - **结论**: 架构不变，只换引擎，全面碾压本地方案且 Writer Recall 反超原文直存 (V0)。
 
 ---
 

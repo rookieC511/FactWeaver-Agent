@@ -25,15 +25,15 @@ llm_smart = ChatOpenAI(
     request_timeout=180,  # R1 thinking takes longer
 )
 
-# 2.5 廉价极速提纯模型 (专门处理数万字长文本切分，成本极低或免费)
-# 这里切换为本地 Ollama，使用 Llama 3.1 8B 专门负责苦力干活
+# 2.5 V3.0 提纯模型 — 切换到云端 API (极致速度 + 强理解力)
+# 从本地 Ollama (llama3.1:8B, ~55s/页) → SiliconFlow GLM-4.7 (~3s/页)
 llm_extractor = ChatOpenAI(
-    model=MODEL_EXTRACTOR,
-    base_url=OLLAMA_BASE_URL,
-    api_key="ollama", # 任意非空字符串以绕过检查
+    model="Pro/zai-org/GLM-4.7",   # GLM-4.7, 强理解力且快速
+    base_url=BASE_URL,            # SiliconFlow API
+    api_key=SILICONFLOW_API_KEY,
     temperature=0.1,  # 事实提取需要低温度
-    max_retries=3,
-    request_timeout=300, # 本地 CPU 跑得慢的话，稍微加长一点超时时间
+    max_retries=5,
+    request_timeout=60,
 )
 
 # 3. GLM-4V (视觉之眼)
