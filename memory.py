@@ -2,6 +2,7 @@ import asyncio
 import time
 import hashlib
 import re
+import random
 from typing import List, Set
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage
@@ -39,7 +40,7 @@ class KnowledgeManager:
         self.fact_blocks.append(doc)
         return 1
 
-    def _split_into_chunks(self, text: str, target_size: int = 10000, max_size: int = 12000) -> List[str]:
+    def _split_into_chunks(self, text: str, target_size: int = 10000, max_size: int = 12000, chunk_overlap: int = 500) -> List[str]:
         """
         智能分块算法 (V2.2 鲁棒性增强)
         =================================
@@ -119,7 +120,10 @@ class KnowledgeManager:
             
             split_pos = max(start + 1, min(split_pos, start + max_size))
             chunks.append(text[start:split_pos])
-            start = split_pos
+            
+            # 1. 切片防断裂机制 (Chunk Overlap): 显式后退，用于保留 Chunk 边界的局部上下文
+            # 注意：取 max(start + 1, ...) 是为了确保指针必然前进，防止切片过小导致死循环
+            start = max(start + 1, split_pos - chunk_overlap)
         
         return [c for c in chunks if len(c.strip()) > 0]
 
@@ -152,29 +156,37 @@ class KnowledgeManager:
         # 3. Map Phase: 串行提取 (受 Semaphore(1) 控制以保证稳定性)
         async def extract_chunk(i: int, chunk: str) -> str:
             async with self.semaphore:
+                # 3. 数据血缘追踪 (Data Lineage): 在 Prompt 中显式绑定 URL 和 Chunk_ID
                 prompt = f"""你是一个冷酷的情报提纯机。请从以下文本块中提取出与研究任务相关的核心事实、数据和逻辑关联。
 
 当前研究任务: {task_desc}
 原文标题: {title}
+当前来源 URL: {source_url}
 当前文本块 (第 {i+1}/{len(chunks)} 块):
 {chunk}
 
 要求:
 - 提取出的信息必须高信息密度
 - 保留具体数字、日期、专有名词
+- 你提取出的每一条事实/数据，都必须在开头附上血缘追踪标签：[Source: {source_url} | Chunk_ID: {i+1}]
 - 以纯文本 Markdown 列表输出，不要寒暄
 """
-                for attempt in range(3):
+                # 2. 高并发 API 防御机制: Exponential Backoff with Jitter
+                max_retries = 3
+                for attempt in range(max_retries):
                     try:
                         resp = await llm_extractor.ainvoke([HumanMessage(content=prompt)])
                         return resp.content.strip()
                     except Exception as e:
-                        if attempt < 2:
-                            print(f"    ⚠️ [Map] 第 {i+1} 块尝试 {attempt+1} 失败: {e}，正在重试...")
-                            await asyncio.sleep(5) # 增加等待时间
+                        if attempt < max_retries - 1:
+                            # 带有随机抖动的指数退避重试 (e.g. 1s, 2s, 4s + 0~1s jitter)
+                            sleep_time = (2 ** attempt) + random.uniform(0, 1)
+                            print(f"    ⚠️ [Map] 第 {i+1} 块尝试 {attempt+1} 失败: {e}，正在进行退避重试 ({sleep_time:.2f}s)...")
+                            await asyncio.sleep(sleep_time)
                         else:
                             print(f"    ❌ [Map] 第 {i+1} 块最终提取失败: {e}")
-                            return ""
+                            # 优雅降级兜底: 当重试耗尽时返回特殊标记，不崩溃进程
+                            return f"<FETCH_FAILED>\nURL: {source_url}\nChunk_ID: {i+1}"
                 return ""
 
         t_map_start = time.perf_counter()
@@ -188,18 +200,18 @@ class KnowledgeManager:
             return self.add_raw_document(f"(Map提取全失败)\n{content[:2000]}", source_url, title)
             
         print(f"    📝 [Reduce] 正在合并 {len(map_results)} 份提取结果...")
-        reduce_prompt = f"""你是一个高级情报编辑。请将下面多份从同一篇文章不同章节提取的事实简讯进行合并、去重、和完善。
+        # 4. 矛盾检测与认知熔断 (Conflict Routing) 第一步: 注入矛盾探测 Prompt
+        reduce_prompt = f"""你是一个高级情报编辑。请将下面多份从同一篇文章不同章节提取的事实简讯进行合并、去重、和综合。
 
 研究任务: {task_desc}
 待合并的事实列表:
 {all_facts}
 
-要求:
-1. 合并重复的事实，修正由于分块导致的信息碎片。
-2. 保持高度简洁，但不要丢失具体的数字、数据和专有名词。
-3. 按照逻辑顺序组织成一份最终的浓缩报告。
-4. 字数严格控制在 1500 字以内。
-5. 以纯文本 Markdown 输出。
+核心要求 (CRITICAL):
+1. **矛盾检测机制 (不抛硬币原则)**: 如果你发现来自不同 Chunk 或 URL 的事实存在严重逻辑矛盾或数据冲突，绝对不要自行捏造、妥协或盲目合并。你必须在输出文本的开头显式包含特殊标记 `[CONFLICT_DETECTED]`，并列出具体的矛盾点。
+2. 保持数据血缘追踪: 保留原始的 `[Source: ... | Chunk_ID: ...]` 标记引用。
+3. 保持高度简洁，按照逻辑顺序组织成一份最终的浓缩报告。
+4. 字数严格控制在 1500 字以内，以纯文本 Markdown 输出。
 """
         try:
             reduce_resp = await llm_extractor.ainvoke([HumanMessage(content=reduce_prompt)])
@@ -218,7 +230,8 @@ class KnowledgeManager:
             )
             self.fact_blocks.append(doc)
             print(f"    ✅ [V2.1] Map-Reduce 提取完成！最终 {len(final_facts)} 字符")
-            return 1
+            # 确保将最终事实返回给上游，以备检测认知熔断标记
+            return final_facts
         except Exception as e:
             print(f"    ❌ [Reduce] 合并失败: {e}")
             return self.add_raw_document(f"(Reduce失败)\n{all_facts[:3000]}", source_url, title)

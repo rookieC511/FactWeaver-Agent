@@ -71,6 +71,12 @@ This file contains critical context for AI assistants working on this project. *
     - **改动**: `models.py` 一行代码 — `llm_extractor` 从本地 Ollama (llama3.1:8B) → SiliconFlow DeepSeek-V3.2。
     - **效果**: 信息密度 0.710 → **1.999** (+181%)；Writer Recall 16.7% → **47.8%** (+186%)；Map 耗时 42.5s → **26.9s** (-37%)。
     - **结论**: 架构不变，只换引擎，全面碾压本地方案且 Writer Recall 反超原文直存 (V0)。
+- **[03-01]** **V3.0 面试级防御性架构升级 ✅**:
+    - **改动**: `memory.py` 和 `graph.py` 补充四大核心防御机制。
+    - **1. 切片防断裂 (Chunk Overlap)**: 显式回退 500 字符保护边界上下文。优势：保留语义文脉防止截断；代价：增加部分 Token 冗余。
+    - **2. 高并发 API 防雪崩 (Jittered Backoff)**: 引入带随机抖动的指数退避与 `<FETCH_FAILED>` 降级。优势：打散并发风暴，保证局部失败不崩盘；代价：可能触发长条尾延迟 (Long Tail Latency)。
+    - **3. 数据血缘追踪 (Data Lineage)**: Map 强制绑定 `[Source | Chunk_ID]` 引用。优势：防幻觉强溯源；代价：提示词空间及输出 Token 占用。
+    - **4. 认知熔断 (Conflict Routing)**: Reduce 不妥协原则，捕获 `[CONFLICT_DETECTED]` 并通过 LangGraph 路由回退重规划。优势：系统具备高阶自省与认知对齐能力；副作用：面临客观数据冲撞时可能有死循环 (Livelock) 风险，需配合状态机指标兜底。
 
 ---
 

@@ -18,11 +18,14 @@ In traditional Deep Research tasks, typical Agent architectures fail due to thre
 
 ## 🚀 Core Architecture (核心架构突破)
 
-FactWeaver-Agent adopts a **Planner-Actor-Critic** topology via LangGraph, with several industrial-grade optimizations:
-
 * **Hybrid Map-Reduce Extraction (并发切片提纯):** Long documents are split into 10K-char chunks and processed concurrently using a Semaphore(4) controlled Map-Reduce pipeline. This achieves robust Needle hit rates and cuts extraction time by over 37%.
 * **Dynamic Size-Model Routing (大小模型算力路由):**
   Heavy-lifting extraction and parallel drafting tasks are intelligently routed to fast, cost-effective APIs (like GLM-4.7/DeepSeek-V3 via SiliconFlow). Only the Chief Editor node utilizes the premium DeepSeek-R1 for complex reasoning and synthesis, striking the perfect balance between speed and quality.
+* **Defensive Architecture Mechanisms (工业级防御性设计):**
+  - ***Chunk Overlap (切片防断裂)***: 500-char explicit overlap preserves semantic context boundaries during 10K chunking.
+  - ***Jittered Backoff (防 API 雪崩)***: Exponential backoff with random jitter inside the Semaphore prevents thundering herds with `<FETCH_FAILED>` graceful degradation instead of process crashes.
+  - ***Data Lineage (血缘强绑)***: Map prompts strictly enforce `[Source | Chunk_ID]` tagging on every extracted fact to combat hallucinated synthesis.
+  - ***Conflict Routing (认知熔断)***: Reduce nodes are instructed with a "No-Compromise" rule. If contradictory facts are merged, it throws `[CONFLICT_DETECTED]`, dynamically triggering a LangGraph conditional edge back to the Planner.
 * **Phoenix Crawler Fallback (不死鸟兜底机制):**
   Primary fetching via Jina AI. If blocked or timed out, it instantly falls back to a custom `BeautifulSoup` scraper, ensuring 100% data flow continuity.
 * **Self-Correction & Traceability (防幻觉溯源):**

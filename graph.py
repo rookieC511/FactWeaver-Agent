@@ -24,6 +24,7 @@ class ResearchState(TypedDict):
     metrics: dict  # {"tool_calls": int, "backtracking": int}
     task_id: str   # For trajectory logging
     history: List[dict] # For SFT Trajectory Recording
+    conflict_detected: bool # 4. 矛盾检测与认知熔断: 路由判断标志
 
 
 # --- 辅助函数 ---
@@ -309,7 +310,17 @@ async def node_deep_research(state: ResearchState):
                     
                     content = scrape_jina_ai(item['url'])
                     if len(content) > 300 and "Access Denied" not in content:
-                        await km.aadd_document(content, item['url'], item['title'], task_desc)
+                        extracted_res = await km.aadd_document(content, item['url'], item['title'], task_desc)
+                        
+                        # 4. 矛盾检测与认知熔断 (Conflict Routing) 第二步: 在节点中捕获标识
+                        if isinstance(extracted_res, str) and "[CONFLICT_DETECTED]" in extracted_res:
+                            print(f"    ⚠️ [Executor] 捕获到认知矛盾！触发熔断机制。")
+                            # 将冲突状态写入局部日志，后续会在外层统计并暴露回 State
+                            logs.append({
+                                "role": "conflict_detected",
+                                "content": "Detected critical conflicting facts in Map-Reduce extraction."
+                            })
+
                         # [SFT] Log Search Result (Observation)
                         logs.append({
                             "role": "search_tool",
@@ -339,12 +350,16 @@ async def node_deep_research(state: ResearchState):
     chunk_size = 3
     new_history_logs = []
     
+    has_conflict = False
     for i in range(0, len(plan), chunk_size):
         chunk = plan[i:i+chunk_size]
         results = await asyncio.gather(*(process_task(t) for t in chunk))
         for r in results:
             if "logs" in r:
                 new_history_logs.extend(r["logs"])
+                # 检查此 Task 中是否发生了矛盾
+                if any(log.get("role") == "conflict_detected" for log in r["logs"]):
+                    has_conflict = True
         
     # [SFT] Update State History
     # We append the new logs from this execution phase
@@ -357,7 +372,8 @@ async def node_deep_research(state: ResearchState):
         
     return {
         "metrics": current_metrics,
-        "history": updated_history
+        "history": updated_history,
+        "conflict_detected": state.get("conflict_detected", False) or has_conflict
     }
 
 async def node_writer(state: ResearchState):
@@ -397,6 +413,16 @@ def router_feedback(state: ResearchState):
         
     return "executor"
 
+
+def router_conflict(state: ResearchState):
+    """4. 矛盾检测与认知熔断: LangGraph 路由判断"""
+    if state.get("conflict_detected"):
+        print("\n🚨 [Router] 重大警告：在深度搜索阶段检测到事实冲突与矛盾！触发【认知熔断】机制。")
+        print("🚨 [Router] 智能体正在自动回退至 Planner 节点请求重新规划与确认...")
+        return "planner"
+    return "writer"
+
+
 # --- Graph 构建 ---
 
 workflow = StateGraph(ResearchState)
@@ -409,7 +435,8 @@ workflow.set_entry_point("planner")
 
 workflow.add_edge("planner", "human_review")
 workflow.add_conditional_edges("human_review", router_feedback, ["planner", "executor", END])
-workflow.add_edge("executor", "writer")
+# 引入认知熔断 Conditional Edge
+workflow.add_conditional_edges("executor", router_conflict, ["writer", "planner"])
 workflow.add_edge("writer", END)
 
 app = workflow.compile()
