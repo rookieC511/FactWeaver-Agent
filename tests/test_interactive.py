@@ -5,7 +5,7 @@ import os
 # Ensure we can import from current directory
 sys.path.append(os.getcwd())
 
-from tools import visual_browse
+from core.tools import visual_browse
 
 async def test_interactive():
     target_url = "https://www.google.com/finance/quote/NVDA:NASDAQ"

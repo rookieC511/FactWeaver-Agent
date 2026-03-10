@@ -5,7 +5,7 @@ import os
 # Ensure we can import from current directory
 sys.path.append(os.getcwd())
 
-from tools import visual_browse
+from core.tools import visual_browse
 
 async def test_browse():
     target_url = "https://finance.yahoo.com/quote/NVDA/"

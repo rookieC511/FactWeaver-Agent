@@ -91,6 +91,7 @@ test_report_eval.txt
 test_result.txt
 *.db
 *.sqlite
+*.sqlite3
 
 # DeepEval telemetry
 .deepeval/
@@ -104,3 +105,16 @@ deep_research_*.md
 project_report.md
 deep_research_db*/
 deep_research_persistent*/
+
+# Runtime state / local queue artifacts
+runtime/
+reports/
+trajectory_log.jsonl
+checkpoints.sqlite3-shm
+checkpoints.sqlite3-wal
+_redis/
+
+# Local benchmark / reverse-engineering repos
+temp_deepresearch_bench/
+legacy/old_benchmark_repo/
+_references/onyx/

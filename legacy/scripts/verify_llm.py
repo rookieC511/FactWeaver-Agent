@@ -17,7 +17,7 @@ builtins.input = lambda prompt="": ""
 
 print("Importing graph...")
 try:
-    from graph import app
+    from core.graph import app
     print("Graph imported successfully.")
 except Exception as e:
     print(f"Graph import failed: {e}")

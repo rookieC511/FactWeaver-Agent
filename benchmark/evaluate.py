@@ -10,8 +10,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from benchmark.naive_rag import naive_rag
 from benchmark.react_agent import react_agent
-from graph import app as dra_app
-from models import llm_smart
+from core.graph import app as dra_app
+from core.models import llm_smart
 from langchain_core.messages import HumanMessage
 
 class Evaluator:

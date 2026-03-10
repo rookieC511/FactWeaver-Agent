@@ -1,4 +1,4 @@
-from tools import tavily_client
+from core.tools import tavily_client
 import json
 
 def test_search():

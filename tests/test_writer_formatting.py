@@ -32,7 +32,7 @@ def mock_input(prompt=""):
 # Import the app AFTER mocking
 # We need to ensure we don't import 'memory' inside writer_graph before our mock is in sys.modules
 # (which we did above)
-import writer_graph
+from core import writer_graph
 
 async def run_test():
     print("🚀 Starting Writer Graph Test...")

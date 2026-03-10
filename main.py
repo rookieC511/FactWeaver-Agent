@@ -1,6 +1,7 @@
 import asyncio
 import sys
-from graph import app
+import uuid
+from core.graph import app
 
 # Windows 下 AsyncIO 的补丁 (防止报错)
 if sys.platform.startswith("win"):
@@ -23,14 +24,19 @@ async def main():
             pass
     
     try:
-        # 启动 Graph
-        res = await app.ainvoke({
-    "query": query, 
-    "iteration": 1, 
-    "plan": [], 
-    "critique": "", 
-    "needs_more": True
-    })
+        # 启动 Graph (P0: 传入 thread_id 以启用 Checkpointer 状态快照)
+        thread_id = str(uuid.uuid4())
+        print(f"🧵 [Session] Thread ID: {thread_id}")
+        res = await app.ainvoke(
+            {
+                "query": query, 
+                "iteration": 1, 
+                "plan": [], 
+                "critique": "", 
+                "needs_more": True
+            },
+            config={"configurable": {"thread_id": thread_id}}
+        )
         
         filename = "deep_research_report.md"
         with open(filename, "w", encoding="utf-8") as f:

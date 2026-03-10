@@ -21,7 +21,7 @@ sys_modules_patch.start()
 # Let's try to import `charts` and test `generate_chart` first, 
 # then mock the node logic flow.
 
-from charts import generate_chart
+from core.charts import generate_chart
 
 class TestChartGen(unittest.TestCase):
     def test_generate_chart(self):

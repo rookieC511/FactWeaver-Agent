@@ -12,6 +12,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
 
 import json
 import re
+import asyncio
 import pytest
 from deepeval.test_case import LLMTestCase, LLMTestCaseParams
 from deepeval.metrics import (
@@ -93,7 +94,7 @@ def test_planning_capability(judge_llm):
     """
     # Lazy import to avoid module-level import issues
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-    from graph import node_init_search
+    from core.graph import node_init_search
 
     # --- 输入: 一个需要多步拆解的复杂研究 query ---
     complex_query = "对比 DeepSeek-R1 和 OpenAI o1 在数学推理任务上的性能差异，分析各自架构优劣"
@@ -109,7 +110,7 @@ def test_planning_capability(judge_llm):
     print(f"\n[Brain/GAIA] Testing planner with: '{complex_query}'")
 
     # --- 直接调用 Planner 节点 (不跑全管线!) ---
-    result = node_init_search(state)
+    result = asyncio.run(node_init_search(state))
 
     search_tasks = result.get("plan", [])
     outline = result.get("outline", [])

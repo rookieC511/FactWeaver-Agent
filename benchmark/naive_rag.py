@@ -2,8 +2,8 @@
 import asyncio
 from typing import List
 from langchain_core.messages import HumanMessage
-from tools import tavily_client
-from models import llm_smart
+from core.tools import tavily_client
+from core.models import llm_smart
 
 class NaiveRAG:
     def __init__(self):

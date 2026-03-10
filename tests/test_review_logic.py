@@ -10,7 +10,7 @@ sys.modules['tools'] = MagicMock()
 sys.modules['charts'] = MagicMock()
 
 # Import the code to test (assuming writer_graph.py is in same dir)
-from writer_graph import human_review_node, continue_to_writers, WriterState
+from core.writer_graph import human_review_node, continue_to_writers, WriterState
 
 class TestReviewInteraction(unittest.TestCase):
     

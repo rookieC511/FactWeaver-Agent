@@ -84,7 +84,7 @@ async def calc_recall_with_llm(extracted_facts: str, ground_truth: list[str]) ->
     """
     增强版 Recall：先跑关键词匹配，对未命中的项再用 LLM Judge 做语义匹配。
     """
-    from models import llm_extractor
+    from core.models import llm_extractor
     from langchain_core.messages import HumanMessage
     
     # Stage 1: 关键词匹配
@@ -164,7 +164,7 @@ def _extract_keywords(text: str) -> list[str]:
 
 async def calc_needle_recall_llm(extracted_facts: str, needle: str) -> bool:
     """用 LLM 语义匹配检查 needle 的核心信息是否被提取"""
-    from models import llm_extractor
+    from core.models import llm_extractor
     from langchain_core.messages import HumanMessage
     
     # Stage 1: 快速关键词检查
@@ -201,7 +201,7 @@ async def calc_precision_llm(extracted_facts: str, original_text: str) -> tuple[
     用本地 Llama-3.1 Judge 检查提取结果中的幻觉比例。
     返回 (precision_score, judge_reasoning)
     """
-    from models import llm_extractor
+    from core.models import llm_extractor
     from langchain_core.messages import HumanMessage
     
     # 截取原文前 8000 字供 Judge 参考（Judge 本身也受限于窗口）
@@ -471,7 +471,7 @@ async def main():
     print(f"\n📦 加载了 {len(cases)} 个测试用例")
     
     # 导入 KnowledgeManager (lazy, 避免 Ollama 未启动时报错)
-    from memory import km
+    from core.memory import km
     
     # 逐个运行
     results = []
