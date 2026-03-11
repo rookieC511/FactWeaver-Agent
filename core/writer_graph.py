@@ -1,15 +1,28 @@
 import json
 import operator
+import os
 from typing import Annotated, Dict, List, TypedDict
 
 from langchain_core.messages import HumanMessage
 from langgraph.graph import END, StateGraph
-from langgraph.types import Send
+try:
+    from langgraph.types import Send
+except Exception:  # pragma: no cover - compatibility for lightweight test stubs
+    class Send(dict):
+        def __init__(self, node: str, arg):
+            super().__init__(node=node, arg=arg)
 
 from core.charts import generate_chart
 from core.memory import get_current_km
 from core.models import llm_chief, llm_smart, llm_worker
 from core.tools import LLMFormatError, clean_json_output
+
+try:
+    from core.checkpoint import get_sqlite_checkpointer
+    from core.config import CHECKPOINT_DB_PATH
+except Exception:  # pragma: no cover - lightweight test imports
+    get_sqlite_checkpointer = None  # type: ignore[assignment]
+    CHECKPOINT_DB_PATH = ""
 
 
 class Section(TypedDict):
@@ -26,6 +39,23 @@ class WriterState(TypedDict):
     final_doc: str
     iteration: int
     user_feedback: str
+    task_id: str
+    writer_context_mode: str
+
+
+WRITER_CONTEXT_SECTION_SCOPED = "section_scoped"
+WRITER_CONTEXT_LEGACY_FULL = "legacy_full_context"
+
+
+def resolve_writer_context_mode(explicit_mode: str | None = None) -> str:
+    mode = (explicit_mode or os.getenv("FACTWEAVER_WRITER_CONTEXT_MODE", WRITER_CONTEXT_SECTION_SCOPED)).strip().lower()
+    if mode not in {WRITER_CONTEXT_SECTION_SCOPED, WRITER_CONTEXT_LEGACY_FULL}:
+        return WRITER_CONTEXT_SECTION_SCOPED
+    return mode
+
+
+def get_writer_thread_id(task_id: str) -> str:
+    return f"{task_id}:writer"
 
 
 def _default_outline(query: str) -> list[dict]:
@@ -150,7 +180,11 @@ async def chart_scout_node(state: WriterState):
 async def section_writer_node(state: Section):
     km = get_current_km()
     section_id = state["id"]
-    docs = km.retrieve(section_id=section_id)
+    context_mode = resolve_writer_context_mode(state.get("writer_context_mode"))
+    if context_mode == WRITER_CONTEXT_LEGACY_FULL:
+        docs = km.retrieve()
+    else:
+        docs = km.retrieve(section_id=section_id)
     context = ""
     for doc in docs:
         citation_hash = doc.metadata.get("citation_hash", "unknown")
@@ -246,4 +280,7 @@ writer_workflow.add_conditional_edges("chart_scout", map_to_writers, ["section_w
 writer_workflow.add_edge("section_writer", "editor")
 writer_workflow.add_edge("editor", END)
 
-writer_app = writer_workflow.compile()
+if get_sqlite_checkpointer and CHECKPOINT_DB_PATH:
+    writer_app = writer_workflow.compile(checkpointer=get_sqlite_checkpointer(CHECKPOINT_DB_PATH))
+else:  # pragma: no cover - compatibility path for import-only tests
+    writer_app = writer_workflow.compile()

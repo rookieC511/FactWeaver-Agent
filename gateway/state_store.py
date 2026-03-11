@@ -56,6 +56,16 @@ def init_state_store() -> None:
                 "tavily_credits_est": "REAL DEFAULT 0",
                 "tavily_cost_usd_est": "REAL DEFAULT 0",
                 "elapsed_seconds": "REAL DEFAULT 0",
+                "attempt_count": "INTEGER DEFAULT 0",
+                "resume_count": "INTEGER DEFAULT 0",
+                "resumed_from_checkpoint": "INTEGER DEFAULT 0",
+                "started_at": "INTEGER",
+                "completed_at": "INTEGER",
+                "last_checkpoint_id": "TEXT",
+                "last_checkpoint_ns": "TEXT DEFAULT ''",
+                "last_checkpoint_node": "TEXT",
+                "interruption_state": "TEXT",
+                "last_km_snapshot_id": "INTEGER",
             },
         )
         conn.execute(
@@ -82,6 +92,26 @@ def init_state_store() -> None:
                 payload_json TEXT,
                 created_at INTEGER NOT NULL
             )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS knowledge_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                checkpoint_id TEXT,
+                checkpoint_ns TEXT DEFAULT '',
+                checkpoint_node TEXT,
+                snapshot_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_knowledge_snapshots_task_created
+            ON knowledge_snapshots(task_id, created_at DESC)
             """
         )
 
@@ -124,6 +154,16 @@ def upsert_task(
     tavily_credits_est: float | None = None,
     tavily_cost_usd_est: float | None = None,
     elapsed_seconds: float | None = None,
+    attempt_count: int | None = None,
+    resume_count: int | None = None,
+    resumed_from_checkpoint: bool | int | None = None,
+    started_at: int | None = None,
+    completed_at: int | None = None,
+    last_checkpoint_id: str | None = None,
+    last_checkpoint_ns: str | None = None,
+    last_checkpoint_node: str | None = None,
+    interruption_state: str | None = None,
+    last_km_snapshot_id: int | None = None,
 ) -> None:
     now = _now_ts()
     with _connect() as conn:
@@ -134,9 +174,11 @@ def upsert_task(
                 backend, created_at, updated_at, last_error, research_mode,
                 llm_cost_rmb, external_cost_usd_est, serper_queries,
                 serper_cost_usd_est, tavily_credits_est, tavily_cost_usd_est,
-                elapsed_seconds
+                elapsed_seconds, attempt_count, resume_count, resumed_from_checkpoint,
+                started_at, completed_at, last_checkpoint_id, last_checkpoint_ns,
+                last_checkpoint_node, interruption_state, last_km_snapshot_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(task_id) DO UPDATE SET
                 query = excluded.query,
                 status = excluded.status,
@@ -154,7 +196,17 @@ def upsert_task(
                 serper_cost_usd_est = COALESCE(excluded.serper_cost_usd_est, tasks.serper_cost_usd_est),
                 tavily_credits_est = COALESCE(excluded.tavily_credits_est, tasks.tavily_credits_est),
                 tavily_cost_usd_est = COALESCE(excluded.tavily_cost_usd_est, tasks.tavily_cost_usd_est),
-                elapsed_seconds = COALESCE(excluded.elapsed_seconds, tasks.elapsed_seconds)
+                elapsed_seconds = COALESCE(excluded.elapsed_seconds, tasks.elapsed_seconds),
+                attempt_count = COALESCE(excluded.attempt_count, tasks.attempt_count),
+                resume_count = COALESCE(excluded.resume_count, tasks.resume_count),
+                resumed_from_checkpoint = COALESCE(excluded.resumed_from_checkpoint, tasks.resumed_from_checkpoint),
+                started_at = COALESCE(excluded.started_at, tasks.started_at),
+                completed_at = COALESCE(excluded.completed_at, tasks.completed_at),
+                last_checkpoint_id = COALESCE(excluded.last_checkpoint_id, tasks.last_checkpoint_id),
+                last_checkpoint_ns = COALESCE(excluded.last_checkpoint_ns, tasks.last_checkpoint_ns),
+                last_checkpoint_node = COALESCE(excluded.last_checkpoint_node, tasks.last_checkpoint_node),
+                interruption_state = COALESCE(excluded.interruption_state, tasks.interruption_state),
+                last_km_snapshot_id = COALESCE(excluded.last_km_snapshot_id, tasks.last_km_snapshot_id)
             """,
             (
                 task_id,
@@ -176,6 +228,16 @@ def upsert_task(
                 tavily_credits_est,
                 tavily_cost_usd_est,
                 elapsed_seconds,
+                attempt_count,
+                resume_count,
+                None if resumed_from_checkpoint is None else int(bool(resumed_from_checkpoint)),
+                started_at,
+                completed_at,
+                last_checkpoint_id,
+                last_checkpoint_ns,
+                last_checkpoint_node,
+                interruption_state,
+                last_km_snapshot_id,
             ),
         )
 
@@ -224,6 +286,67 @@ def record_dlq(
             "created_at": now,
         }
     )
+
+
+def save_knowledge_snapshot(
+    task_id: str,
+    *,
+    thread_id: str,
+    checkpoint_id: str | None,
+    checkpoint_ns: str | None,
+    checkpoint_node: str | None,
+    snapshot: dict[str, Any],
+) -> int:
+    now = _now_ts()
+    snapshot_json = json.dumps(snapshot, ensure_ascii=False)
+    with _connect() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO knowledge_snapshots (
+                task_id, thread_id, checkpoint_id, checkpoint_ns, checkpoint_node,
+                snapshot_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_id,
+                thread_id,
+                checkpoint_id,
+                checkpoint_ns or "",
+                checkpoint_node,
+                snapshot_json,
+                now,
+            ),
+        )
+        snapshot_id = int(cursor.lastrowid or 0)
+        conn.execute(
+            """
+            UPDATE tasks
+            SET last_km_snapshot_id = ?, updated_at = ?
+            WHERE task_id = ?
+            """,
+            (snapshot_id, now, task_id),
+        )
+    return snapshot_id
+
+
+def get_latest_knowledge_snapshot(task_id: str) -> dict[str, Any] | None:
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM knowledge_snapshots
+            WHERE task_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (task_id,),
+        ).fetchone()
+    if not row:
+        return None
+    data = dict(row)
+    data["snapshot"] = json.loads(data.get("snapshot_json") or "{}")
+    return data
 
 
 def _redis_client():

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import axios from 'axios';
 import SearchBar from './components/SearchBar';
 import type { ResearchMode } from './components/SearchBar';
@@ -34,12 +34,12 @@ function App() {
           setTavilyCredits(Number(data.tavily_credits_est || 0));
 
           if (data.status === 'SUCCESS') {
-            setDetail('数据提取完成，报告已生成。');
+            setDetail('\u6570\u636e\u63d0\u53d6\u5b8c\u6210\uff0c\u62a5\u544a\u5df2\u751f\u6210\u3002');
             setReport(data.report || '');
           } else if (data.status === 'FAILED') {
-            setDetail(data.detail || '任务执行过程中遭遇异常中断。');
+            setDetail(data.detail || '\u4efb\u52a1\u6267\u884c\u8fc7\u7a0b\u4e2d\u9047\u5230\u5f02\u5e38\u5e76\u4e2d\u65ad\u3002');
           } else {
-            setDetail(data.detail || '正在分析网络数据...');
+            setDetail(data.detail || '\u6b63\u5728\u5206\u6790\u7f51\u7edc\u6570\u636e...');
           }
         } catch (error) {
           console.error('Polling error:', error);
@@ -56,7 +56,7 @@ function App() {
     try {
       setTaskId(null);
       setStatus('PENDING');
-      setDetail('任务已提交至队列，等待处理...');
+      setDetail('\u4efb\u52a1\u5df2\u63d0\u4ea4\u81f3\u961f\u5217\uff0c\u7b49\u5f85\u5904\u7406...');
       setReport('');
       setResearchMode(mode);
       setLlmCostRmb(0);
@@ -69,7 +69,7 @@ function App() {
     } catch (error) {
       console.error('Submission error:', error);
       setStatus('FAILED');
-      setDetail('服务端通信异常，请检查网关是否启动。');
+      setDetail('\u670d\u52a1\u7aef\u901a\u4fe1\u5f02\u5e38\uff0c\u8bf7\u68c0\u67e5\u7f51\u5173\u662f\u5426\u542f\u52a8\u3002');
     }
   };
 

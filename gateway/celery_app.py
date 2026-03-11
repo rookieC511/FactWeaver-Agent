@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import os
 
 from core.config import REDIS_BROKER_URL, REDIS_RESULT_BACKEND
 
@@ -22,7 +23,8 @@ try:
         task_soft_time_limit=1500,
         task_default_retry_delay=10,
         task_max_retries=3,
-        worker_concurrency=2,
+        worker_concurrency=int(os.getenv("CELERY_WORKER_CONCURRENCY", "2")),
+        worker_pool=os.getenv("CELERY_WORKER_POOL", "prefork"),
         worker_prefetch_multiplier=1,
         result_expires=86400,
         task_routes={"tasks.run_research_task": {"queue": "research_queue"}},
@@ -46,7 +48,8 @@ except Exception:
                 task_acks_late=True,
                 task_time_limit=1800,
                 task_soft_time_limit=1500,
-                worker_concurrency=2,
+                worker_concurrency=int(os.getenv("CELERY_WORKER_CONCURRENCY", "2")),
+                worker_pool=os.getenv("CELERY_WORKER_POOL", "prefork"),
                 worker_prefetch_multiplier=1,
             )
 

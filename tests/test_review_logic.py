@@ -2,6 +2,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 import sys
+import os
 
 # Mock dependencies to avoid importing heavy modules or connecting to real LLMs
 sys.modules['models'] = MagicMock()
@@ -16,11 +17,16 @@ class TestReviewInteraction(unittest.TestCase):
     
     @patch('builtins.input', return_value="Add gaming section")
     def test_feedback_loop(self, mock_input):
+        previous = os.environ.pop("FACTWEAVER_API_MODE", None)
         print("\nTesting Feedback Entry...")
         state = {"outline": [{"id":"1", "title":"Old", "description": "desc"}], "iteration": 0}
         
         # Test human_review_node returning feedback state
-        result = human_review_node(state)
+        try:
+            result = human_review_node(state)
+        finally:
+            if previous is not None:
+                os.environ["FACTWEAVER_API_MODE"] = previous
         
         self.assertEqual(result['user_feedback'], "Add gaming section")
         self.assertEqual(result['iteration'], 1)
@@ -35,10 +41,15 @@ class TestReviewInteraction(unittest.TestCase):
 
     @patch('builtins.input', return_value="") # User hits enter
     def test_approval(self, mock_input):
+        previous = os.environ.pop("FACTWEAVER_API_MODE", None)
         print("\nTesting Approval...")
         state = {"outline": [{"id":"1", "title":"Good", "description": "desc"}], "iteration": 0}
         
-        result = human_review_node(state)
+        try:
+            result = human_review_node(state)
+        finally:
+            if previous is not None:
+                os.environ["FACTWEAVER_API_MODE"] = previous
         
         self.assertEqual(result['user_feedback'], "")
         print("✅ node confirmed approval")
