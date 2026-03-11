@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from core.config import DEFAULT_RESEARCH_MODE
 from core.costs import enrich_cost_fields
-from gateway.celery_app import CELERY_AVAILABLE
+from gateway.celery_app import CELERY_AVAILABLE, celery
 from gateway.executor import run_research_job_sync
 from gateway.state_store import get_cached_report, get_task, list_dlq, upsert_task
 
@@ -111,9 +111,8 @@ async def submit_research(req: ResearchRequest, bg_tasks: BackgroundTasks):
     )
 
     if CELERY_AVAILABLE:
-        from gateway.tasks import run_research_task
-
-        run_research_task.apply_async(
+        celery.send_task(
+            "tasks.run_research_task",
             kwargs={
                 "task_id": task_id,
                 "query": req.query,
@@ -180,9 +179,8 @@ async def resume_research(task_id: str, bg_tasks: BackgroundTasks):
     )
 
     if CELERY_AVAILABLE:
-        from gateway.tasks import resume_research_task
-
-        resume_research_task.apply_async(
+        celery.send_task(
+            "tasks.resume_research_task",
             kwargs={
                 "task_id": task_id,
                 "query": query,
