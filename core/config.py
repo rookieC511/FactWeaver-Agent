@@ -15,6 +15,7 @@ DEFAULT_RESEARCH_MODE = os.getenv("DEFAULT_RESEARCH_MODE", "medium").strip().low
 # Public pricing snapshots used for benchmark estimation only
 SERPER_USD_PER_QUERY = float(os.getenv("SERPER_USD_PER_QUERY", "0.001"))
 TAVILY_USD_PER_CREDIT = float(os.getenv("TAVILY_USD_PER_CREDIT", "0.008"))
+USD_TO_RMB_RATE = float(os.getenv("USD_TO_RMB_RATE", "7.20"))
 
 # Legacy placeholders kept for compatibility
 DB_PATH = ":memory:"

@@ -13,6 +13,25 @@ def ping_worker():
     return {"status": "ok", "worker": "factweaver", "transport": "redis"}
 
 
+def _run_task(
+    task_id: str,
+    query: str,
+    *,
+    research_mode: str,
+    disable_cache: bool,
+    resume_from_checkpoint: bool,
+    backend: str,
+) -> dict:
+    return run_research_job_sync(
+        task_id,
+        query,
+        backend=backend,
+        research_mode=research_mode,
+        disable_cache=disable_cache,
+        resume_from_checkpoint=resume_from_checkpoint,
+    )
+
+
 @celery.task(
     bind=True,
     name="tasks.run_research_task",
@@ -20,21 +39,29 @@ def ping_worker():
     default_retry_delay=10,
     acks_late=True,
 )
-def run_research_task(self, query: str, research_mode: str = "medium"):
-    task_id = getattr(self.request, "id", None) or getattr(self, "request", {}).get("id")
-    task_id = task_id or "local-task"
+def run_research_task(
+    self,
+    task_id: str,
+    query: str,
+    research_mode: str = "medium",
+    disable_cache: bool = False,
+    resume_from_checkpoint: bool = False,
+):
     try:
         logger.info(
-            "[Celery Worker] start task_id=%s mode=%s query=%s",
+            "[Celery Worker] start task_id=%s mode=%s resume=%s query=%s",
             task_id,
             research_mode,
+            resume_from_checkpoint,
             query[:80],
         )
-        return run_research_job_sync(
+        return _run_task(
             task_id,
             query,
-            backend="celery",
             research_mode=research_mode,
+            disable_cache=disable_cache,
+            resume_from_checkpoint=resume_from_checkpoint,
+            backend="celery",
         )
     except Exception as exc:
         retry_count = getattr(self.request, "retries", 0)
@@ -67,6 +94,59 @@ def run_research_task(self, query: str, research_mode: str = "medium"):
             thread_id=task_id,
             retries=retry_count + 1,
             error=repr(exc),
-            payload={"traceback": traceback.format_exc(), "research_mode": research_mode},
+            payload={
+                "traceback": traceback.format_exc(),
+                "research_mode": research_mode,
+                "resume_from_checkpoint": resume_from_checkpoint,
+            },
+        )
+        raise
+
+
+@celery.task(
+    bind=True,
+    name="tasks.resume_research_task",
+    max_retries=1,
+    default_retry_delay=5,
+    acks_late=True,
+)
+def resume_research_task(
+    self,
+    task_id: str,
+    query: str,
+    research_mode: str = "medium",
+    disable_cache: bool = True,
+):
+    try:
+        logger.info(
+            "[Celery Worker] resume task_id=%s mode=%s query=%s",
+            task_id,
+            research_mode,
+            query[:80],
+        )
+        return _run_task(
+            task_id,
+            query,
+            research_mode=research_mode,
+            disable_cache=disable_cache,
+            resume_from_checkpoint=True,
+            backend="celery",
+        )
+    except Exception as exc:
+        logger.error(
+            "[Celery Worker] resume failed task_id=%s error=%s\n%s",
+            task_id,
+            exc,
+            traceback.format_exc(),
+        )
+        upsert_task(
+            task_id,
+            query,
+            "FAILED",
+            detail=f"恢复执行失败: {exc}",
+            thread_id=task_id,
+            backend="celery",
+            last_error=repr(exc),
+            research_mode=research_mode,
         )
         raise

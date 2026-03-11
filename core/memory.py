@@ -4,7 +4,7 @@ import hashlib
 import random
 import re
 import time
-from typing import List, Set
+from typing import Any, List, Set
 
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage
@@ -32,6 +32,32 @@ class KnowledgeManager:
     def clear(self):
         self.seen_urls.clear()
         self.fact_blocks.clear()
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "seen_urls": sorted(self.seen_urls),
+            "fact_blocks": [
+                {
+                    "page_content": doc.page_content,
+                    "metadata": dict(doc.metadata),
+                }
+                for doc in self.fact_blocks
+            ],
+        }
+
+    def restore(self, snapshot: dict[str, Any] | None) -> None:
+        data = dict(snapshot or {})
+        self.clear()
+        self.session_id = str(data.get("session_id") or self.session_id)
+        self.seen_urls = set(data.get("seen_urls") or [])
+        self.fact_blocks = [
+            Document(
+                page_content=str(item.get("page_content") or ""),
+                metadata=dict(item.get("metadata") or {}),
+            )
+            for item in data.get("fact_blocks") or []
+        ]
 
     def add_raw_document(
         self,
@@ -350,6 +376,12 @@ def get_session_km(session_id: str) -> KnowledgeManager:
 def cleanup_session_km(session_id: str):
     if session_id in _session_registry:
         del _session_registry[session_id]
+
+
+def restore_session_km(session_id: str, snapshot: dict[str, Any] | None) -> KnowledgeManager:
+    km = get_session_km(session_id)
+    km.restore(snapshot)
+    return km
 
 
 def activate_session(session_id: str):

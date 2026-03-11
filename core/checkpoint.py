@@ -112,4 +112,14 @@ class SQLiteBackedMemorySaver(InMemorySaver):
         self._persist()
 
 
-__all__ = ["SQLiteBackedMemorySaver"]
+_CHECKPOINTERS: dict[str, SQLiteBackedMemorySaver] = {}
+
+
+def get_sqlite_checkpointer(db_path: str) -> SQLiteBackedMemorySaver:
+    path = str(Path(db_path))
+    if path not in _CHECKPOINTERS:
+        _CHECKPOINTERS[path] = SQLiteBackedMemorySaver(path)
+    return _CHECKPOINTERS[path]
+
+
+__all__ = ["SQLiteBackedMemorySaver", "get_sqlite_checkpointer"]

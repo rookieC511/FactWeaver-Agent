@@ -8,10 +8,11 @@ from typing import Any, List, TypedDict
 from langchain_core.messages import HumanMessage
 from langgraph.graph import END, StateGraph
 
-from core.checkpoint import SQLiteBackedMemorySaver
+from core.checkpoint import get_sqlite_checkpointer
 from core.config import CHECKPOINT_DB_PATH, DEFAULT_RESEARCH_MODE
 from core.memory import get_current_km, get_current_session_id
 from core.models import llm_fast
+from core.runtime_control import crash_process, should_interrupt_task
 from core.tools import (
     LLMFormatError,
     ToolExecutionError,
@@ -32,7 +33,8 @@ from core.tools import (
     tavily_search_credits,
     visual_browse,
 )
-from core.writer_graph import writer_app
+from core.writer_graph import get_writer_thread_id, resolve_writer_context_mode, writer_app
+from gateway.state_store import get_task, save_knowledge_snapshot, upsert_task
 
 
 class ResearchState(TypedDict):
@@ -866,6 +868,10 @@ def _build_degradation_appendix(state: ResearchState) -> str:
 
 
 async def node_writer(state: ResearchState):
+    task_id = state.get("task_id") or get_current_session_id() or "unknown-task"
+    writer_thread_id = get_writer_thread_id(task_id)
+    writer_config = {"configurable": {"thread_id": writer_thread_id}}
+    writer_context_mode = resolve_writer_context_mode()
     writer_inputs = {
         "query": state["query"],
         "outline": state.get("outline", []),
@@ -873,9 +879,61 @@ async def node_writer(state: ResearchState):
         "final_doc": "",
         "iteration": 0,
         "user_feedback": "SKIP_REVIEW",
+        "task_id": task_id,
+        "writer_context_mode": writer_context_mode,
     }
     try:
-        result = await writer_app.ainvoke(writer_inputs)
+        interrupt_before = ["editor"] if should_interrupt_task(task_id, "writer.before_editor") else None
+        existing_writer_state = writer_app.get_state(writer_config)
+        if existing_writer_state.values.get("final_doc") and not existing_writer_state.next:
+            result = existing_writer_state.values
+        else:
+            writer_input = None if existing_writer_state.next else writer_inputs
+            latest_result: dict[str, Any] = {}
+            async for event in writer_app.astream(
+                writer_input,
+                config=writer_config,
+                interrupt_before=interrupt_before,
+            ):
+                if "__interrupt__" in event:
+                    writer_state = writer_app.get_state(writer_config)
+                    checkpoint_config = dict(writer_state.config.get("configurable", {}))
+                    save_knowledge_snapshot(
+                        task_id,
+                        thread_id=task_id,
+                        checkpoint_id=checkpoint_config.get("checkpoint_id"),
+                        checkpoint_ns=checkpoint_config.get("checkpoint_ns"),
+                        checkpoint_node="writer.section_writer",
+                        snapshot=get_current_km().snapshot(),
+                    )
+                    task = get_task(task_id) or {}
+                    upsert_task(
+                        task_id,
+                        state["query"],
+                        "INTERRUPTED",
+                        detail="Writer paused before editor for checkpoint recovery testing",
+                        thread_id=task_id,
+                        backend=task.get("backend") or "resume",
+                        research_mode=state.get("research_mode", DEFAULT_RESEARCH_MODE),
+                        llm_cost_rmb=float(task.get("llm_cost_rmb") or 0.0),
+                        external_cost_usd_est=float(task.get("external_cost_usd_est") or 0.0),
+                        serper_queries=int(task.get("serper_queries") or 0),
+                        serper_cost_usd_est=float(task.get("serper_cost_usd_est") or 0.0),
+                        tavily_credits_est=float(task.get("tavily_credits_est") or 0.0),
+                        tavily_cost_usd_est=float(task.get("tavily_cost_usd_est") or 0.0),
+                        elapsed_seconds=float(task.get("elapsed_seconds") or 0.0),
+                        attempt_count=int(task.get("attempt_count") or 1),
+                        resume_count=int(task.get("resume_count") or 0),
+                        resumed_from_checkpoint=bool(task.get("resumed_from_checkpoint") or 0),
+                        started_at=task.get("started_at"),
+                        last_checkpoint_id=checkpoint_config.get("checkpoint_id"),
+                        last_checkpoint_ns=checkpoint_config.get("checkpoint_ns"),
+                        last_checkpoint_node="writer.section_writer",
+                        interruption_state="writer.before_editor",
+                    )
+                    crash_process()
+                latest_result.update(event)
+            result = writer_app.get_state(writer_config).values if latest_result else existing_writer_state.values
         report = result.get("final_doc", "Writing Failed")
     except Exception as exc:
         report = f"Writer Subgraph Error: {exc}"
@@ -914,5 +972,5 @@ workflow.add_conditional_edges("human_review", router_feedback, ["planner", "exe
 workflow.add_conditional_edges("executor", router_conflict, ["writer", "planner"])
 workflow.add_edge("writer", END)
 
-checkpointer = SQLiteBackedMemorySaver(CHECKPOINT_DB_PATH)
+checkpointer = get_sqlite_checkpointer(CHECKPOINT_DB_PATH)
 app = workflow.compile(checkpointer=checkpointer)

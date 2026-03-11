@@ -80,10 +80,17 @@ deepresearch-agent/
 
 - `research_mode`
 - `llm_cost_rmb`
-- `external_cost_usd_est`
+- `external_cost_rmb_est`
+- `total_cost_rmb_est`
 - `serper_queries`
 - `tavily_credits_est`
 - `elapsed_seconds`
+
+审计明细中仍保留：
+
+- `external_cost_usd_est`
+- `serper_cost_usd_est`
+- `tavily_cost_usd_est`
 
 ## 环境变量
 
@@ -176,11 +183,33 @@ BENCHMARK_QUERY_LIMIT=1
 python scripts/benchmark_modes.py
 ```
 
+## 这次真实成本测试结论
+
+说明：以下数据来自 `2026-03-11` 的完整 `3 queries x 3 modes` 离线重评分结果。原始运行已启用预算熔断 `BENCHMARK_MAX_TASK_RMB=0.60`、`BENCHMARK_MAX_TOTAL_RMB=3.00`；本次只做离线人民币换算和质量评分，不新增模型或检索花费。
+
+| Mode | Avg LLM Cost (RMB) | Avg External Cost (RMB) | Avg Total Cost (RMB) | FACT/RACE Quality | Value Score | Overall Score | Avg Time (s) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| low | 0.0804 | 0.1008 | 0.1812 | 7.49 | 8.68 | 7.85 | 574.25 |
+| medium | 0.1119 | 0.7416 | 0.8535 | 8.90 | 2.14 | 6.87 | 434.85 |
+| high | 0.1467 | 2.9568 | 3.1035 | 8.90 | 0.80 | 6.47 | 682.87 |
+
+本批 `9` 轮合计成本：
+
+- `LLM Cost = 1.0170 RMB`
+- `External Cost = 11.3976 RMB`
+- `Total Cost = 12.4146 RMB`
+
+- 默认推荐档位：`medium`
+- 质量最高档位：`high`
+- 性价比最高档位：`low`
+- 最慢且最贵档位：`high`
+- 当前评分口径：`quality_score = 0.55 * FACT + 0.45 * RACE`，`overall_score = 0.70 * quality + 0.30 * value`
+
 ## 当前结论
 
 - 默认推荐 `medium`
 - `low` 最省外部检索成本，但不一定最快
-- `high` 的模型成本仍可控，但 Tavily 外部检索成本明显更高
+- `high` 的报告质量最高，但 Tavily 外部检索成本明显更高
 - 全量 benchmark 必须带预算熔断，不建议裸跑
 
 ## 文档
@@ -188,3 +217,24 @@ python scripts/benchmark_modes.py
 - 架构上下文：[docs/AI_CONTEXT.md](docs/AI_CONTEXT.md)
 - 本轮改造说明：[docs/architecture_alignment_v44.md](docs/architecture_alignment_v44.md)
 - 面试架构表述：[docs/INTERVIEW_GRAPH_ARCHITECTURE.md](docs/INTERVIEW_GRAPH_ARCHITECTURE.md)
+
+## 2026-03-11 新增能力
+
+- 显式恢复入口：
+  - `POST /research/{task_id}/resume`
+- 恢复链路从“只有 checkpoint”升级为：
+  - `checkpoint + task state + KnowledgeManager snapshot`
+- writer 子图现在也支持 checkpoint，因此恢复安全点覆盖到：
+  - `planner` 后
+  - `executor` 后
+  - `writer.section_writer` fan-in 完成后、`editor` 开始前
+- benchmark 默认本地 judge 已切到：
+  - `qwen3:8b`
+  - fallback 为 `llama3.1:latest`
+
+对应脚本：
+- `python scripts/judge_bakeoff.py`
+- `python scripts/recovery_benchmark.py`
+- `python scripts/concurrency_probe.py`
+- `python scripts/cost_ab_experiment.py`
+- `python scripts/benchmark_30_runs.py`

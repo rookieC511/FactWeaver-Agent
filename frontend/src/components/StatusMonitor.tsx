@@ -28,15 +28,15 @@ const StatusMonitor: React.FC<StatusMonitorProps> = ({
     const getStatusConfig = () => {
         switch (status) {
             case 'PENDING':
-                return { icon: <Clock size={24} />, title: '研究排队中', className: 'pending', spin: false };
+                return { icon: <Clock size={24} />, title: '\u7814\u7a76\u6392\u961f\u4e2d', className: 'pending', spin: false };
             case 'STARTED':
-                return { icon: <Loader2 size={24} />, title: '执行中', className: 'started', spin: true };
+                return { icon: <Loader2 size={24} />, title: '\u6267\u884c\u4e2d', className: 'started', spin: true };
             case 'SUCCESS':
-                return { icon: <CheckCircle size={24} />, title: '研究完成', className: 'success', spin: false };
+                return { icon: <CheckCircle size={24} />, title: '\u7814\u7a76\u5b8c\u6210', className: 'success', spin: false };
             case 'FAILED':
-                return { icon: <XCircle size={24} />, title: '任务失败', className: 'error', spin: false };
+                return { icon: <XCircle size={24} />, title: '\u4efb\u52a1\u5931\u8d25', className: 'error', spin: false };
             default:
-                return { icon: <Loader2 size={24} />, title: '处理中', className: '', spin: true };
+                return { icon: <Loader2 size={24} />, title: '\u5904\u7406\u4e2d', className: '', spin: true };
         }
     };
 
@@ -52,10 +52,10 @@ const StatusMonitor: React.FC<StatusMonitorProps> = ({
                 <p>{detail}</p>
                 <div style={{ marginTop: '0.5rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
                     <span className="task-id-badge">ID: {taskId.split('-')[0]}...</span>
-                    <span className="task-id-badge">Mode: {researchMode}</span>
-                    <span className="task-id-badge">LLM: RMB {llmCostRmb.toFixed(4)}</span>
-                    <span className="task-id-badge">External: USD {externalCostUsd.toFixed(4)}</span>
-                    {tavilyCredits > 0 && <span className="task-id-badge">Tavily: {tavilyCredits.toFixed(1)} cr</span>}
+                    <span className="task-id-badge">{`\u6a21\u5f0f: ${researchMode}`}</span>
+                    <span className="task-id-badge">{`LLM: RMB ${llmCostRmb.toFixed(4)}`}</span>
+                    <span className="task-id-badge">{`\u5916\u90e8: USD ${externalCostUsd.toFixed(4)}`}</span>
+                    {tavilyCredits > 0 && <span className="task-id-badge">{`Tavily: ${tavilyCredits.toFixed(1)} cr`}</span>}
                 </div>
             </div>
         </div>
