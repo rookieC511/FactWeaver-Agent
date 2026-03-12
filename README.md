@@ -1,5 +1,33 @@
 # FactWeaver-Agent
 
+## 2026-03-12 Update
+
+- API submit path no longer calls `celery.send_task(...)` in the request thread.
+- New architecture: `SQLite task state + SQLite publish_outbox + in-process outbox publisher`.
+- `POST /research` / `POST /research/{task_id}/resume` now mean:
+  - task accepted and persisted
+  - publish to Redis/Celery happens asynchronously
+- `GET /research/{task_id}` now includes:
+  - `publish_status`
+  - `publish_attempt_count`
+  - `publish_last_error`
+  - `queued_at`
+- Public benchmark path is now split from the internal 10-query benchmark:
+  - internal: `scripts/benchmark_30_runs.py`
+  - public: `scripts/public_benchmark_deepsearchqa.py`
+  - submit latency smoke: `scripts/submit_latency_smoke.py`
+
+### Latest submit-path smoke
+
+- Failure-mode smoke without a running Redis broker:
+  - report: `reports/submit_latency_smoke_20260312_133816.json`
+  - average submit latency: `31.4625 ms`
+  - P95 submit latency: `45.3463 ms`
+  - publish failure rate: `1.0`
+- Interpretation:
+  - request/response decoupling is working
+  - broker failure is now isolated to outbox publish state instead of blocking the API request
+
 工业级 Deep Research Agent。当前版本已经完成从“单体同步调用”到“队列化网关 + 持久化状态机 + 三档检索模式”的重构。
 
 ## 当前版本

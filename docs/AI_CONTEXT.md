@@ -1,5 +1,31 @@
 # Deep Research Agent - AI Context
 
+## 2026-03-12 Active Update
+
+- Submit path has been upgraded from synchronous broker publish to `SQLite outbox`.
+- Current API contract:
+  - `POST /research` means task accepted and persisted
+  - `POST /research/{task_id}/resume` uses the same outbox path
+  - queue publish is asynchronous and no longer blocks the request thread
+- Active task state now includes:
+  - `publish_status`
+  - `publish_attempt_count`
+  - `publish_last_error`
+  - `queued_at`
+- New runtime component:
+  - `gateway/outbox.py` runs an in-process outbox publisher on FastAPI startup
+- Benchmark split is now explicit:
+  - internal report benchmark: `scripts/benchmark_30_runs.py`
+  - public QA benchmark: `scripts/public_benchmark_deepsearchqa.py`
+  - submit latency validation: `scripts/submit_latency_smoke.py`
+- Public benchmark direction is fixed to:
+  - public dataset sample first
+  - extract final answer(s) from the long report
+  - compare extracted answer(s) against gold answers
+- Current public benchmark default target:
+  - dataset: `google/deepsearchqa`
+  - first run size: `30` stratified samples
+
 这个文件只保留当前仍然生效的项目上下文，避免把历史实验流水账继续堆进主上下文。
 
 历史决策看：

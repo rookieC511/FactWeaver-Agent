@@ -94,5 +94,5 @@ def test_resume_endpoint_accepts_resumable_task(monkeypatch):
     response = client.post("/research/task-1/resume")
     assert response.status_code == 200
     assert captured["task_id"] == "task-1"
-    assert captured["status"] == "PENDING"
+    assert captured["status"] == "QUEUED"
     assert captured["kwargs"]["resumed_from_checkpoint"] is True

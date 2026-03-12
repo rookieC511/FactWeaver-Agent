@@ -17,6 +17,7 @@ try:
         task_serializer="json",
         result_serializer="json",
         accept_content=["json"],
+        task_publish_retry=False,
         task_acks_late=True,
         task_reject_on_worker_lost=True,
         task_time_limit=1800,
@@ -27,6 +28,12 @@ try:
         worker_pool=os.getenv("CELERY_WORKER_POOL", "prefork"),
         worker_prefetch_multiplier=1,
         result_expires=86400,
+        broker_connection_timeout=float(os.getenv("CELERY_BROKER_CONNECTION_TIMEOUT", "3")),
+        broker_transport_options={
+            "socket_connect_timeout": float(os.getenv("CELERY_SOCKET_CONNECT_TIMEOUT", "3")),
+            "socket_timeout": float(os.getenv("CELERY_SOCKET_TIMEOUT", "3")),
+            "retry_on_timeout": False,
+        },
         task_routes={"tasks.run_research_task": {"queue": "research_queue"}},
         task_default_queue="research_queue",
     )

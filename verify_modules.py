@@ -120,7 +120,8 @@ async def run_all_checks():
     try:
         from gateway.api import ResearchRequest, app as fastapi_app
         from gateway.celery_app import CELERY_AVAILABLE, celery
-        from gateway.state_store import get_task, hash_query, list_dlq
+        from gateway.outbox import publish_outbox_once, queue_publish_request
+        from gateway.state_store import get_outbox_stats, get_task, hash_query, list_dlq
 
         routes = [route.path for route in fastapi_app.routes if hasattr(route, "path")]
         check("FastAPI app", fastapi_app is not None)
@@ -130,6 +131,9 @@ async def run_all_checks():
         check("Celery compatibility layer", celery is not None, str(CELERY_AVAILABLE))
         check("DLQ list callable", isinstance(list_dlq(limit=1), list))
         check("Task lookup callable", get_task("missing") is None)
+        check("Outbox stats callable", isinstance(get_outbox_stats(), dict))
+        check("Outbox queue helper", callable(queue_publish_request))
+        check("Outbox publish_once", callable(publish_outbox_once))
         req = ResearchRequest(query="hello")
         check("Research mode default", req.research_mode == "medium", req.research_mode)
         check(

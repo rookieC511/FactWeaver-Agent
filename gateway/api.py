@@ -7,16 +7,17 @@ from pydantic import BaseModel, Field, field_validator
 
 from core.config import DEFAULT_RESEARCH_MODE
 from core.costs import enrich_cost_fields
-from gateway.celery_app import CELERY_AVAILABLE, celery
+from gateway.celery_app import CELERY_AVAILABLE
 from gateway.executor import run_research_job_sync
-from gateway.state_store import get_cached_report, get_task, list_dlq, upsert_task
+from gateway.outbox import queue_publish_request, start_outbox_publisher, stop_outbox_publisher
+from gateway.state_store import get_cached_report, get_outbox_stats, get_task, list_dlq, upsert_task
 
 os.environ["FACTWEAVER_API_MODE"] = "1"
 
 app = FastAPI(
     title="FactWeaver-Agent API",
     description="Deep Research Agent with queue-backed execution and durable task state.",
-    version="4.6.0",
+    version="4.7.0",
 )
 
 app.add_middleware(
@@ -44,8 +45,8 @@ class ResearchRequest(BaseModel):
 
 class ResearchResponse(BaseModel):
     task_id: str
-    status: str = "QUEUED"
-    message: str = "任务已提交至队列"
+    status: str = "PENDING"
+    message: str = "任务已接收并持久化"
     research_mode: str = DEFAULT_RESEARCH_MODE
 
 
@@ -63,6 +64,41 @@ def _run_local_task(
         research_mode=research_mode,
         disable_cache=disable_cache,
         resume_from_checkpoint=resume_from_checkpoint,
+    )
+
+
+@app.on_event("startup")
+async def startup_event():
+    await start_outbox_publisher()
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    await stop_outbox_publisher()
+
+
+def _queue_remote_job(
+    *,
+    task_id: str,
+    query: str,
+    research_mode: str,
+    disable_cache: bool,
+    resume_from_checkpoint: bool,
+) -> None:
+    task_name = "tasks.resume_research_task" if resume_from_checkpoint else "tasks.run_research_task"
+    payload = {
+        "task_id": task_id,
+        "query": query,
+        "research_mode": research_mode,
+        "disable_cache": disable_cache,
+    }
+    if not resume_from_checkpoint:
+        payload["resume_from_checkpoint"] = False
+    queue_publish_request(
+        task_id,
+        queue_name="research_queue",
+        task_name=task_name,
+        payload=payload,
     )
 
 
@@ -87,6 +123,7 @@ async def submit_research(req: ResearchRequest, bg_tasks: BackgroundTasks):
             external_cost_usd_est=float(metadata.get("external_cost_usd_est", 0.0)),
             elapsed_seconds=float(metadata.get("elapsed_seconds", 0.0)),
             completed_at=int(metadata.get("completed_at") or 0) or None,
+            publish_status="CACHED",
         )
         return ResearchResponse(
             task_id=task_id,
@@ -95,45 +132,56 @@ async def submit_research(req: ResearchRequest, bg_tasks: BackgroundTasks):
             research_mode=req.research_mode,
         )
 
-    backend = "celery" if CELERY_AVAILABLE else "local"
+    if CELERY_AVAILABLE:
+        upsert_task(
+            task_id,
+            req.query,
+            "PENDING",
+            detail="任务已接收并持久化，等待投递到 Redis/Celery",
+            thread_id=task_id,
+            backend="celery",
+            research_mode=req.research_mode,
+            attempt_count=0,
+            resume_count=0,
+            resumed_from_checkpoint=False,
+            interruption_state="publish_pending",
+            publish_status="PENDING",
+            publish_attempt_count=0,
+        )
+        _queue_remote_job(
+            task_id=task_id,
+            query=req.query,
+            research_mode=req.research_mode,
+            disable_cache=req.disable_cache,
+            resume_from_checkpoint=False,
+        )
+        return ResearchResponse(
+            task_id=task_id,
+            status="PENDING",
+            message="任务已接收并持久化，等待发布到 Redis/Celery",
+            research_mode=req.research_mode,
+        )
+
     upsert_task(
         task_id,
         req.query,
-        "PENDING",
-        detail="任务已入队，等待执行",
+        "QUEUED",
+        detail="Celery 不可用，已切换本地后台执行",
         thread_id=task_id,
-        backend=backend,
+        backend="local",
         research_mode=req.research_mode,
         attempt_count=0,
         resume_count=0,
         resumed_from_checkpoint=False,
-        interruption_state="queued",
+        interruption_state="local_queued",
+        publish_status="LOCAL_FALLBACK",
+        publish_attempt_count=0,
     )
-
-    if CELERY_AVAILABLE:
-        celery.send_task(
-            "tasks.run_research_task",
-            kwargs={
-                "task_id": task_id,
-                "query": req.query,
-                "research_mode": req.research_mode,
-                "disable_cache": req.disable_cache,
-                "resume_from_checkpoint": False,
-            },
-            queue="research_queue",
-        )
-        return ResearchResponse(
-            task_id=task_id,
-            status="QUEUED",
-            message="任务已提交到 Redis/Celery",
-            research_mode=req.research_mode,
-        )
-
     bg_tasks.add_task(_run_local_task, task_id, req.query, req.research_mode, req.disable_cache, False)
     return ResearchResponse(
         task_id=task_id,
         status="QUEUED",
-        message="Celery 不可用，已切换本地回退执行",
+        message="Celery 不可用，已切换本地后台执行",
         research_mode=req.research_mode,
     )
 
@@ -148,17 +196,54 @@ async def resume_research(task_id: str, bg_tasks: BackgroundTasks):
     if task.get("status") == "SUCCESS":
         raise HTTPException(status_code=409, detail="task already completed successfully")
 
-    backend = "celery" if CELERY_AVAILABLE else "local"
     query = task.get("query") or ""
     research_mode = task.get("research_mode") or DEFAULT_RESEARCH_MODE
+
+    if CELERY_AVAILABLE:
+        upsert_task(
+            task_id,
+            query,
+            "PENDING",
+            detail="恢复请求已接收并持久化，等待从最近 checkpoint 继续执行",
+            thread_id=task_id,
+            backend="celery",
+            research_mode=research_mode,
+            llm_cost_rmb=float(task.get("llm_cost_rmb") or 0.0),
+            external_cost_usd_est=float(task.get("external_cost_usd_est") or 0.0),
+            serper_queries=int(task.get("serper_queries") or 0),
+            serper_cost_usd_est=float(task.get("serper_cost_usd_est") or 0.0),
+            tavily_credits_est=float(task.get("tavily_credits_est") or 0.0),
+            tavily_cost_usd_est=float(task.get("tavily_cost_usd_est") or 0.0),
+            elapsed_seconds=float(task.get("elapsed_seconds") or 0.0),
+            attempt_count=int(task.get("attempt_count") or 0),
+            resume_count=int(task.get("resume_count") or 0),
+            resumed_from_checkpoint=True,
+            started_at=task.get("started_at"),
+            last_checkpoint_id=task.get("last_checkpoint_id"),
+            last_checkpoint_ns=task.get("last_checkpoint_ns"),
+            last_checkpoint_node=task.get("last_checkpoint_node"),
+            interruption_state="publish_pending_resume",
+            last_km_snapshot_id=task.get("last_km_snapshot_id"),
+            publish_status="PENDING",
+            publish_attempt_count=0,
+            publish_last_error=None,
+        )
+        _queue_remote_job(
+            task_id=task_id,
+            query=query,
+            research_mode=research_mode,
+            disable_cache=True,
+            resume_from_checkpoint=True,
+        )
+        return {"task_id": task_id, "status": "PENDING", "message": "resume request accepted and persisted"}
 
     upsert_task(
         task_id,
         query,
-        "PENDING",
-        detail="已提交恢复任务，等待从最近 checkpoint 继续执行",
+        "QUEUED",
+        detail="恢复任务已切换为本地后台执行",
         thread_id=task_id,
-        backend=backend,
+        backend="local",
         research_mode=research_mode,
         llm_cost_rmb=float(task.get("llm_cost_rmb") or 0.0),
         external_cost_usd_est=float(task.get("external_cost_usd_est") or 0.0),
@@ -174,23 +259,11 @@ async def resume_research(task_id: str, bg_tasks: BackgroundTasks):
         last_checkpoint_id=task.get("last_checkpoint_id"),
         last_checkpoint_ns=task.get("last_checkpoint_ns"),
         last_checkpoint_node=task.get("last_checkpoint_node"),
-        interruption_state="queued_for_resume",
+        interruption_state="local_resume_queued",
         last_km_snapshot_id=task.get("last_km_snapshot_id"),
+        publish_status="LOCAL_FALLBACK",
+        publish_attempt_count=0,
     )
-
-    if CELERY_AVAILABLE:
-        celery.send_task(
-            "tasks.resume_research_task",
-            kwargs={
-                "task_id": task_id,
-                "query": query,
-                "research_mode": research_mode,
-                "disable_cache": True,
-            },
-            queue="research_queue",
-        )
-        return {"task_id": task_id, "status": "QUEUED", "message": "resume job queued"}
-
     bg_tasks.add_task(_run_local_task, task_id, query, research_mode, True, True)
     return {"task_id": task_id, "status": "QUEUED", "message": "resume job queued locally"}
 
@@ -219,6 +292,10 @@ async def get_research_status(task_id: str):
             "last_checkpoint_id": task.get("last_checkpoint_id"),
             "last_checkpoint_node": task.get("last_checkpoint_node"),
             "interruption_state": task.get("interruption_state") or "",
+            "publish_status": task.get("publish_status") or "",
+            "publish_attempt_count": int(task.get("publish_attempt_count") or 0),
+            "publish_last_error": task.get("publish_last_error") or "",
+            "queued_at": task.get("queued_at"),
             "created_at": task.get("created_at"),
             "started_at": task.get("started_at"),
             "completed_at": task.get("completed_at"),
@@ -243,7 +320,8 @@ async def health_check():
     return {
         "status": "ok",
         "service": "FactWeaver-Agent",
-        "version": "4.6.0",
+        "version": "4.7.0",
         "queue_mode": "celery" if CELERY_AVAILABLE else "local-fallback",
         "default_research_mode": DEFAULT_RESEARCH_MODE,
+        "outbox_stats": get_outbox_stats(),
     }

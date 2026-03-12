@@ -21,8 +21,8 @@ def _connect():
         conn.close()
 
 
-def _now_ts() -> int:
-    return int(time.time())
+def _now_ts() -> float:
+    return time.time()
 
 
 def init_state_store() -> None:
@@ -66,7 +66,34 @@ def init_state_store() -> None:
                 "last_checkpoint_node": "TEXT",
                 "interruption_state": "TEXT",
                 "last_km_snapshot_id": "INTEGER",
+                "publish_status": "TEXT DEFAULT ''",
+                "publish_attempt_count": "INTEGER DEFAULT 0",
+                "publish_last_error": "TEXT",
+                "queued_at": "REAL",
             },
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS publish_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                queue_name TEXT NOT NULL,
+                task_name TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                published_at REAL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_publish_outbox_status_created
+            ON publish_outbox(status, created_at ASC)
+            """
         )
         conn.execute(
             """
@@ -164,6 +191,10 @@ def upsert_task(
     last_checkpoint_node: str | None = None,
     interruption_state: str | None = None,
     last_km_snapshot_id: int | None = None,
+    publish_status: str | None = None,
+    publish_attempt_count: int | None = None,
+    publish_last_error: str | None = None,
+    queued_at: float | None = None,
 ) -> None:
     now = _now_ts()
     with _connect() as conn:
@@ -176,9 +207,10 @@ def upsert_task(
                 serper_cost_usd_est, tavily_credits_est, tavily_cost_usd_est,
                 elapsed_seconds, attempt_count, resume_count, resumed_from_checkpoint,
                 started_at, completed_at, last_checkpoint_id, last_checkpoint_ns,
-                last_checkpoint_node, interruption_state, last_km_snapshot_id
+                last_checkpoint_node, interruption_state, last_km_snapshot_id,
+                publish_status, publish_attempt_count, publish_last_error, queued_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(task_id) DO UPDATE SET
                 query = excluded.query,
                 status = excluded.status,
@@ -206,7 +238,11 @@ def upsert_task(
                 last_checkpoint_ns = COALESCE(excluded.last_checkpoint_ns, tasks.last_checkpoint_ns),
                 last_checkpoint_node = COALESCE(excluded.last_checkpoint_node, tasks.last_checkpoint_node),
                 interruption_state = COALESCE(excluded.interruption_state, tasks.interruption_state),
-                last_km_snapshot_id = COALESCE(excluded.last_km_snapshot_id, tasks.last_km_snapshot_id)
+                last_km_snapshot_id = COALESCE(excluded.last_km_snapshot_id, tasks.last_km_snapshot_id),
+                publish_status = COALESCE(excluded.publish_status, tasks.publish_status),
+                publish_attempt_count = COALESCE(excluded.publish_attempt_count, tasks.publish_attempt_count),
+                publish_last_error = COALESCE(excluded.publish_last_error, tasks.publish_last_error),
+                queued_at = COALESCE(excluded.queued_at, tasks.queued_at)
             """,
             (
                 task_id,
@@ -238,6 +274,10 @@ def upsert_task(
                 last_checkpoint_node,
                 interruption_state,
                 last_km_snapshot_id,
+                publish_status,
+                publish_attempt_count,
+                publish_last_error,
+                queued_at,
             ),
         )
 
@@ -286,6 +326,188 @@ def record_dlq(
             "created_at": now,
         }
     )
+
+
+def enqueue_publish_job(
+    task_id: str,
+    *,
+    queue_name: str,
+    task_name: str,
+    payload: dict[str, Any],
+) -> int:
+    now = _now_ts()
+    payload_json = json.dumps(payload, ensure_ascii=False)
+    with _connect() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO publish_outbox (
+                task_id, queue_name, task_name, payload_json, status,
+                attempt_count, last_error, created_at, updated_at, published_at
+            )
+            VALUES (?, ?, ?, ?, 'PENDING', 0, NULL, ?, ?, NULL)
+            """,
+            (task_id, queue_name, task_name, payload_json, now, now),
+        )
+        conn.execute(
+            """
+            UPDATE tasks
+            SET publish_status = 'PENDING',
+                publish_attempt_count = 0,
+                publish_last_error = NULL,
+                queued_at = NULL,
+                updated_at = ?
+            WHERE task_id = ?
+            """,
+            (now, task_id),
+        )
+        return int(cursor.lastrowid or 0)
+
+
+def _publish_backoff_seconds(attempt_count: int) -> float:
+    return float(min(60, 2 ** max(0, attempt_count)))
+
+
+def claim_publish_jobs(
+    *,
+    limit: int = 10,
+    max_attempts: int = 6,
+    stale_after_seconds: float = 30.0,
+) -> list[dict[str, Any]]:
+    now = _now_ts()
+    with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM publish_outbox
+            WHERE status IN ('PENDING', 'FAILED', 'PUBLISHING')
+              AND attempt_count < ?
+            ORDER BY created_at ASC, id ASC
+            """,
+            (max_attempts,),
+        ).fetchall()
+        selected_ids: list[int] = []
+        selected_rows: list[dict[str, Any]] = []
+        for row in rows:
+            data = dict(row)
+            status = str(data.get("status") or "")
+            attempt_count = int(data.get("attempt_count") or 0)
+            updated_at = float(data.get("updated_at") or 0.0)
+            if status == "PUBLISHING" and (now - updated_at) < stale_after_seconds:
+                continue
+            if status == "FAILED" and (now - updated_at) < _publish_backoff_seconds(attempt_count):
+                continue
+            selected_ids.append(int(data["id"]))
+            selected_rows.append(data)
+            if len(selected_rows) >= limit:
+                break
+
+        if selected_ids:
+            placeholders = ", ".join("?" for _ in selected_ids)
+            conn.execute(
+                f"""
+                UPDATE publish_outbox
+                SET status = 'PUBLISHING',
+                    updated_at = ?
+                WHERE id IN ({placeholders})
+                """,
+                (now, *selected_ids),
+            )
+
+        return selected_rows
+
+
+def mark_publish_job_published(outbox_id: int) -> None:
+    now = _now_ts()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT task_id, attempt_count FROM publish_outbox WHERE id = ?",
+            (outbox_id,),
+        ).fetchone()
+        if not row:
+            return
+        task_id = str(row["task_id"])
+        attempt_count = int(row["attempt_count"] or 0) + 1
+        conn.execute(
+            """
+            UPDATE publish_outbox
+            SET status = 'PUBLISHED',
+                attempt_count = ?,
+                last_error = NULL,
+                updated_at = ?,
+                published_at = ?
+            WHERE id = ?
+            """,
+            (attempt_count, now, now, outbox_id),
+        )
+        conn.execute(
+            """
+            UPDATE tasks
+            SET status = CASE WHEN status = 'PENDING' THEN 'QUEUED' ELSE status END,
+                detail = CASE
+                    WHEN status = 'PENDING' THEN '任务已发布到 Redis/Celery，等待 worker 拉取'
+                    ELSE detail
+                END,
+                publish_status = 'PUBLISHED',
+                publish_attempt_count = ?,
+                publish_last_error = NULL,
+                queued_at = COALESCE(queued_at, ?),
+                updated_at = ?
+            WHERE task_id = ?
+            """,
+            (attempt_count, now, now, task_id),
+        )
+
+
+def mark_publish_job_failed(outbox_id: int, error: str) -> None:
+    now = _now_ts()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT task_id, attempt_count FROM publish_outbox WHERE id = ?",
+            (outbox_id,),
+        ).fetchone()
+        if not row:
+            return
+        task_id = str(row["task_id"])
+        attempt_count = int(row["attempt_count"] or 0) + 1
+        conn.execute(
+            """
+            UPDATE publish_outbox
+            SET status = 'FAILED',
+                attempt_count = ?,
+                last_error = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (attempt_count, error, now, outbox_id),
+        )
+        conn.execute(
+            """
+            UPDATE tasks
+            SET detail = CASE
+                    WHEN status = 'PENDING' THEN '任务投递到 Redis/Celery 失败，系统将自动重试'
+                    ELSE detail
+                END,
+                publish_status = 'FAILED',
+                publish_attempt_count = ?,
+                publish_last_error = ?,
+                updated_at = ?
+            WHERE task_id = ?
+            """,
+            (attempt_count, error, now, task_id),
+        )
+
+
+def get_outbox_stats() -> dict[str, int]:
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT status, COUNT(*) AS count
+            FROM publish_outbox
+            GROUP BY status
+            """
+        ).fetchall()
+    return {str(row["status"]): int(row["count"]) for row in rows}
 
 
 def save_knowledge_snapshot(
