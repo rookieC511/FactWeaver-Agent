@@ -13,6 +13,7 @@ OUTBOX_BATCH_SIZE = int(os.getenv("OUTBOX_BATCH_SIZE", "10"))
 OUTBOX_MAX_ATTEMPTS = int(os.getenv("OUTBOX_MAX_ATTEMPTS", "6"))
 OUTBOX_STALE_AFTER_SECONDS = float(os.getenv("OUTBOX_STALE_AFTER_SECONDS", "30"))
 OUTBOX_PUBLISH_TIMEOUT_SECONDS = float(os.getenv("OUTBOX_PUBLISH_TIMEOUT_SECONDS", "4"))
+OUTBOX_WARMUP_TIMEOUT_SECONDS = float(os.getenv("OUTBOX_WARMUP_TIMEOUT_SECONDS", "35"))
 
 _publisher_task: asyncio.Task | None = None
 _stop_event: asyncio.Event | None = None
@@ -40,6 +41,12 @@ def _send_to_celery(row: dict[str, Any]) -> None:
         kwargs=payload,
         queue=str(row["queue_name"]),
     )
+
+
+def _warm_celery_connection() -> None:
+    with celery.connection_for_write() as conn:
+        conn.ensure_connection(max_retries=1)
+    celery.send_task("tasks.ping_worker", kwargs={}, queue="research_queue")
 
 
 async def publish_outbox_once() -> int:
@@ -86,6 +93,13 @@ async def start_outbox_publisher() -> None:
         return
     if _publisher_task and not _publisher_task.done():
         return
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(_warm_celery_connection),
+            timeout=OUTBOX_WARMUP_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        pass
     _stop_event = asyncio.Event()
     _publisher_task = asyncio.create_task(_publisher_loop(), name="factweaver-outbox-publisher")
 

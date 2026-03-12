@@ -5,6 +5,7 @@ import json
 import random
 import re
 import string
+import sys
 import time
 import uuid
 from collections import defaultdict
@@ -13,9 +14,15 @@ from typing import Any
 
 from datasets import load_dataset
 
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 from core.config import USD_TO_RMB_RATE
 from core.costs import usd_to_rmb
+import gateway.executor as executor_module
 from gateway.executor import run_research_job_sync
+from gateway.state_store import get_task
 from scripts.benchmark_scoring import LOCAL_JUDGE_BASE_URL, LOCAL_JUDGE_MODEL, score_result
 
 try:
@@ -24,7 +31,6 @@ except Exception:  # pragma: no cover
     OpenAI = None  # type: ignore[assignment]
 
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
 REPORTS_DIR = ROOT_DIR / "reports"
 
 DEFAULT_DATASET_ID = "google/deepsearchqa"
@@ -196,6 +202,16 @@ def load_deepsearchqa_sample(*, sample_size: int, seed: int, dataset_id: str, sp
     return stratified_sample(rows, sample_size=sample_size, seed=seed)
 
 
+def build_benchmark_query(problem: str, answer_type: str) -> str:
+    answer_contract = (
+        "At the end of the report, add a markdown section titled 'Final Answer'. "
+        "That section must contain only the direct final answer."
+    )
+    if answer_type == "Set Answer":
+        answer_contract += " If there are multiple answers, list them as a comma-separated set in that section."
+    return f"{problem}\n\n[Benchmark Output Contract]\n{answer_contract}"
+
+
 def run_public_benchmark(
     *,
     sample_size: int,
@@ -205,7 +221,11 @@ def run_public_benchmark(
     seed: int,
     judge_model: str | None,
     extractor_model: str | None,
+    max_allin_rmb: float,
+    max_task_duration_seconds: int,
 ) -> dict[str, Any]:
+    original_max_task_duration_seconds = executor_module.MAX_TASK_DURATION_SECONDS
+    executor_module.MAX_TASK_DURATION_SECONDS = max_task_duration_seconds
     sample_rows = load_deepsearchqa_sample(
         sample_size=sample_size,
         seed=seed,
@@ -213,48 +233,73 @@ def run_public_benchmark(
         split=split,
     )
     results: list[dict[str, Any]] = []
-    for idx, row in enumerate(sample_rows):
-        task_id = f"deepsearchqa-{research_mode}-{idx}-{uuid.uuid4().hex[:8]}"
-        research = run_research_job_sync(
-            task_id,
-            row["problem"],
-            backend="public_benchmark",
-            research_mode=research_mode,
-            disable_cache=True,
-        )
-        prediction = extract_answer_from_report(
-            str(research.get("report") or ""),
-            answer_type=str(row["answer_type"]),
-            extractor_model=extractor_model,
-        )
-        answer_score = evaluate_prediction(prediction, str(row["answer"]), str(row["answer_type"]))
-        quality_scored = score_result(dict(research), judge_model=judge_model, allow_local_judge=True)
-        results.append(
-            {
-                "task_id": task_id,
-                "problem": row["problem"],
-                "problem_category": row["problem_category"],
-                "gold_answer": row["answer"],
-                "answer_type": row["answer_type"],
-                "research_mode": research_mode,
-                "report": research.get("report"),
-                "predicted_answer": prediction["final_answer"],
-                "predicted_answers": prediction["final_answers"],
-                "extractor_mode": prediction["extractor_mode"],
-                "exact_match": answer_score["exact_match"],
-                "f1": answer_score["f1"],
-                "llm_cost_rmb": float(research.get("llm_cost_rmb", 0.0)),
-                "external_cost_usd_est": float(research.get("external_cost_usd_est", 0.0)),
-                "external_cost_rmb_est": usd_to_rmb(research.get("external_cost_usd_est", 0.0)),
-                "total_cost_rmb_est": float(research.get("llm_cost_rmb", 0.0))
-                + usd_to_rmb(research.get("external_cost_usd_est", 0.0)),
-                "elapsed_seconds": float(research.get("elapsed_seconds", 0.0)),
-                "fact_score": quality_scored.get("fact_score"),
-                "race_score": quality_scored.get("race_score"),
-                "quality_score": quality_scored.get("quality_score"),
-                "judge_mode": quality_scored.get("judge_mode"),
-            }
-        )
+    stopped_early = False
+    try:
+        for idx, row in enumerate(sample_rows):
+            projected_total = sum(float(item["total_cost_rmb_est"]) for item in results)
+            if projected_total >= max_allin_rmb:
+                stopped_early = True
+                break
+            task_id = f"deepsearchqa-{research_mode}-{idx}-{uuid.uuid4().hex[:8]}"
+            research: dict[str, Any]
+            failure_error = ""
+            try:
+                research = run_research_job_sync(
+                    task_id,
+                    build_benchmark_query(str(row["problem"]), str(row["answer_type"])),
+                    backend="public_benchmark",
+                    research_mode=research_mode,
+                    disable_cache=True,
+                )
+            except Exception as exc:
+                failure_error = repr(exc)
+                persisted = get_task(task_id) or {}
+                research = {
+                    "task_id": task_id,
+                    "status": persisted.get("status", "FAILED"),
+                    "report": persisted.get("report", ""),
+                    "llm_cost_rmb": float(persisted.get("llm_cost_rmb") or 0.0),
+                    "external_cost_usd_est": float(persisted.get("external_cost_usd_est") or 0.0),
+                    "elapsed_seconds": float(persisted.get("elapsed_seconds") or 0.0),
+                    "detail": persisted.get("detail") or failure_error,
+                }
+            prediction = extract_answer_from_report(
+                str(research.get("report") or ""),
+                answer_type=str(row["answer_type"]),
+                extractor_model=extractor_model,
+            )
+            answer_score = evaluate_prediction(prediction, str(row["answer"]), str(row["answer_type"]))
+            quality_scored = score_result(dict(research), judge_model=judge_model, allow_local_judge=True)
+            results.append(
+                {
+                    "task_id": task_id,
+                    "problem": row["problem"],
+                    "problem_category": row["problem_category"],
+                    "gold_answer": row["answer"],
+                    "answer_type": row["answer_type"],
+                    "research_mode": research_mode,
+                    "status": research.get("status", "FAILED"),
+                    "error": failure_error or research.get("detail", ""),
+                    "report": research.get("report"),
+                    "predicted_answer": prediction["final_answer"],
+                    "predicted_answers": prediction["final_answers"],
+                    "extractor_mode": prediction["extractor_mode"],
+                    "exact_match": answer_score["exact_match"],
+                    "f1": answer_score["f1"],
+                    "llm_cost_rmb": float(research.get("llm_cost_rmb", 0.0)),
+                    "external_cost_usd_est": float(research.get("external_cost_usd_est", 0.0)),
+                    "external_cost_rmb_est": usd_to_rmb(research.get("external_cost_usd_est", 0.0)),
+                    "total_cost_rmb_est": float(research.get("llm_cost_rmb", 0.0))
+                    + usd_to_rmb(research.get("external_cost_usd_est", 0.0)),
+                    "elapsed_seconds": float(research.get("elapsed_seconds", 0.0)),
+                    "fact_score": quality_scored.get("fact_score"),
+                    "race_score": quality_scored.get("race_score"),
+                    "quality_score": quality_scored.get("quality_score"),
+                    "judge_mode": quality_scored.get("judge_mode"),
+                }
+            )
+    finally:
+        executor_module.MAX_TASK_DURATION_SECONDS = original_max_task_duration_seconds
 
     exact_matches = [float(item["exact_match"]) for item in results]
     f1_scores = [float(item["f1"]) for item in results]
@@ -264,7 +309,10 @@ def run_public_benchmark(
         "dataset_id": dataset_id,
         "dataset_split": split,
         "sample_size": len(results),
+        "requested_sample_size": sample_size,
         "research_mode": research_mode,
+        "stopped_early": stopped_early,
+        "max_allin_rmb": max_allin_rmb,
         "usd_to_rmb_rate": USD_TO_RMB_RATE,
         "results": results,
         "summary": {
@@ -272,6 +320,7 @@ def run_public_benchmark(
             "f1": round(sum(f1_scores) / max(1, len(f1_scores)), 4),
             "avg_total_cost_rmb_est": round(sum(total_costs) / max(1, len(total_costs)), 4),
             "avg_elapsed_seconds": round(sum(elapsed) / max(1, len(elapsed)), 4),
+            "task_success_rate": round(sum(1 for item in results if item.get("status") == "SUCCESS") / max(1, len(results)), 4),
             "answer_extraction_failure_rate": round(
                 sum(1 for item in results if not str(item.get("predicted_answer") or "").strip()) / max(1, len(results)),
                 4,
@@ -292,7 +341,10 @@ def write_report(payload: dict[str, Any]) -> tuple[Path, Path]:
         "",
         f"- Dataset: `{payload['dataset_id']}` / `{payload['dataset_split']}`",
         f"- Sample Size: `{payload['sample_size']}`",
+        f"- Requested Sample Size: `{payload['requested_sample_size']}`",
         f"- Mode: `{payload['research_mode']}`",
+        f"- Max All-in Budget (RMB): `{payload['max_allin_rmb']}`",
+        f"- Stopped Early: `{payload['stopped_early']}`",
         "",
         "| Metric | Value |",
         "| --- | ---: |",
@@ -300,6 +352,7 @@ def write_report(payload: dict[str, Any]) -> tuple[Path, Path]:
         f"| F1 | {summary['f1']:.4f} |",
         f"| Avg Total Cost (RMB) | {summary['avg_total_cost_rmb_est']:.4f} |",
         f"| Avg Elapsed (s) | {summary['avg_elapsed_seconds']:.4f} |",
+        f"| Task Success Rate | {summary['task_success_rate']:.4f} |",
         f"| Answer Extraction Failure Rate | {summary['answer_extraction_failure_rate']:.4f} |",
     ]
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -315,6 +368,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--judge-model", default=LOCAL_JUDGE_MODEL)
     parser.add_argument("--extractor-model", default=LOCAL_JUDGE_MODEL)
+    parser.add_argument("--max-allin-rmb", type=float, default=30.0)
+    parser.add_argument("--max-task-duration-seconds", type=int, default=900)
     args = parser.parse_args()
     payload = run_public_benchmark(
         sample_size=args.sample_size,
@@ -324,6 +379,8 @@ def main() -> None:
         seed=args.seed,
         judge_model=args.judge_model or None,
         extractor_model=args.extractor_model or None,
+        max_allin_rmb=args.max_allin_rmb,
+        max_task_duration_seconds=args.max_task_duration_seconds,
     )
     json_path, md_path = write_report(payload)
     print(f"[public-benchmark] json={json_path}")
