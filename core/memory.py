@@ -65,20 +65,23 @@ class KnowledgeManager:
         source_url: str,
         title: str,
         section_id: str = "global",
+        extra_metadata: dict[str, Any] | None = None,
     ):
         if len(content or "") < 10:
             return 0
         self.seen_urls.add(source_url)
+        metadata = {
+            "source_url": source_url,
+            "url": source_url,
+            "title": title,
+            "timestamp": time.time(),
+            "citation_hash": hashlib.md5(source_url.encode()).hexdigest()[:6],
+            "section_id": section_id,
+        }
+        metadata.update(dict(extra_metadata or {}))
         doc = Document(
             page_content=content,
-            metadata={
-                "source_url": source_url,
-                "url": source_url,
-                "title": title,
-                "timestamp": time.time(),
-                "citation_hash": hashlib.md5(source_url.encode()).hexdigest()[:6],
-                "section_id": section_id,
-            },
+            metadata=metadata,
         )
         self.fact_blocks.append(doc)
         return 1
@@ -89,8 +92,9 @@ class KnowledgeManager:
         source_url: str,
         title: str,
         section_id: str = "global",
+        extra_metadata: dict[str, Any] | None = None,
     ):
-        return self.add_raw_document(content, source_url, title, section_id=section_id)
+        return self.add_raw_document(content, source_url, title, section_id=section_id, extra_metadata=extra_metadata)
 
     def add_compact_document(
         self,
@@ -99,12 +103,19 @@ class KnowledgeManager:
         title: str,
         section_id: str = "global",
         max_chars: int = 4000,
+        extra_metadata: dict[str, Any] | None = None,
     ):
         compact = re.sub(r"\n{3,}", "\n\n", content or "").strip()
         compact = re.sub(r" {4,}", " ", compact)
         if len(compact) > max_chars:
             compact = compact[:max_chars]
-        return self.add_raw_document(compact, source_url, title, section_id=section_id)
+        return self.add_raw_document(
+            compact,
+            source_url,
+            title,
+            section_id=section_id,
+            extra_metadata=extra_metadata,
+        )
 
     def _split_extracted_text(self, text: str, max_chars: int = 1200) -> List[str]:
         normalized = re.sub(r"\n{3,}", "\n\n", (text or "").strip())
@@ -140,6 +151,7 @@ class KnowledgeManager:
         title: str,
         section_id: str = "global",
         provider: str = "tavily_extract",
+        extra_metadata: dict[str, Any] | None = None,
     ) -> int:
         if isinstance(chunks, str):
             chunk_list = self._split_extracted_text(chunks)
@@ -166,6 +178,7 @@ class KnowledgeManager:
                     "extraction_version": provider,
                     "chunk_index": index,
                     "num_chunks": len(chunk_list),
+                    **dict(extra_metadata or {}),
                 },
             )
             self.fact_blocks.append(doc)
@@ -349,13 +362,23 @@ class KnowledgeManager:
         k: int = 100,
         section_id: str = None,
     ) -> List[Document]:
+        docs = self.fact_blocks
         if section_id:
-            return [
+            docs = [
                 doc
-                for doc in self.fact_blocks
+                for doc in docs
                 if doc.metadata.get("section_id") in (section_id, "global")
-            ][:k]
-        return self.fact_blocks[:k]
+            ]
+        docs = sorted(
+            docs,
+            key=lambda doc: (
+                float(doc.metadata.get("authority_score") or 0.0),
+                1 if str(doc.metadata.get("source_tier") or "") == "high_authority" else 0,
+                float(doc.metadata.get("timestamp") or 0.0),
+            ),
+            reverse=True,
+        )
+        return docs[:k]
 
 
 km = KnowledgeManager()

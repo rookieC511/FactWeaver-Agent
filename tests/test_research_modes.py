@@ -58,7 +58,23 @@ def test_low_mode_skips_aadd_document(monkeypatch):
         "asearch",
         AsyncMock(return_value={"results": [{"url": "https://example.com/a", "title": "A"}]}),
     )
-    monkeypatch.setattr(graph, "scrape_jina_ai", AsyncMock(return_value="useful content " * 50))
+    monkeypatch.setattr(
+        graph,
+        "fetch_source_candidate",
+        AsyncMock(
+            return_value={
+                "status": "ok",
+                "provider": "jina",
+                "content": "useful content " * 50,
+                "content_length": len("useful content " * 50),
+                "final_url": "https://example.com/a",
+                "error_class": "",
+                "page_type": "general_html",
+                "http_status": 200,
+                "authority_preserved": False,
+            }
+        ),
+    )
 
     try:
         result = asyncio.run(node_deep_research(_base_state("low")))

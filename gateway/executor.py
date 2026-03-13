@@ -53,6 +53,9 @@ def _graph_input(task_id: str, query: str, research_mode: str) -> dict[str, Any]
         "iteration": 1,
         "plan": [],
         "outline": [],
+        "task_contract": {},
+        "evidence_slots": {},
+        "draft_audit": {},
         "user_feedback": "",
         "final_report": "",
         "metrics": {"tool_calls": 0, "backtracking": 0},
@@ -64,6 +67,11 @@ def _graph_input(task_id: str, query: str, research_mode: str) -> dict[str, Any]
         "research_mode": research_mode,
         "cost_breakdown": {},
         "retrieval_metrics": {},
+        "source_candidates": [],
+        "fetch_results": [],
+        "coverage_summary": {},
+        "backfill_attempts": 0,
+        "retrieval_failed": False,
     }
 
 
@@ -285,8 +293,11 @@ async def run_research_job(
         report = merged_state.get("final_report", "报告生成失败")
         external_costs = _coerce_costs(merged_state.get("cost_breakdown"))
         retrieval_metrics = dict(merged_state.get("retrieval_metrics") or {})
+        retrieval_failed = bool(merged_state.get("retrieval_failed"))
+        final_status = "FAILED" if (backend == "drb_public_benchmark" and retrieval_failed) else "SUCCESS"
+        final_detail = "证据获取不足，未进入正式写作阶段" if retrieval_failed else "研究任务已完成"
 
-        if not disable_cache:
+        if not disable_cache and not retrieval_failed:
             cache_report(
                 query,
                 report,
@@ -307,8 +318,8 @@ async def run_research_job(
             query=query,
             backend=backend,
             research_mode=research_mode,
-            status="SUCCESS",
-            detail="研究任务已完成",
+            status=final_status,
+            detail=final_detail,
             current_cost=global_cost_tracker.total_cost_rmb,
             merged_state=merged_state,
             elapsed_seconds=elapsed,
@@ -317,7 +328,7 @@ async def run_research_job(
             resumed_from_checkpoint=resume_from_checkpoint,
             started_at=started_at,
             completed_at=int(time.time()),
-            checkpoint_node="writer",
+            checkpoint_node="executor" if retrieval_failed else "writer",
             interruption_state="completed",
             report=report,
         )
@@ -325,7 +336,7 @@ async def run_research_job(
             {
                 "task_id": task_id,
                 "thread_id": task_id,
-                "status": "SUCCESS",
+                "status": final_status,
                 "report": report,
                 "research_mode": research_mode,
                 "llm_cost_rmb": global_cost_tracker.total_cost_rmb,
@@ -335,6 +346,14 @@ async def run_research_job(
                 "tavily_credits_est": external_costs["tavily_credits_est"],
                 "tavily_cost_usd_est": external_costs["tavily_cost_usd_est"],
                 "retrieval_metrics": retrieval_metrics,
+                "task_contract": dict(merged_state.get("task_contract") or {}),
+                "evidence_slots": dict(merged_state.get("evidence_slots") or {}),
+                "draft_audit": dict(merged_state.get("draft_audit") or {}),
+                "source_candidates": list(merged_state.get("source_candidates") or []),
+                "fetch_results": list(merged_state.get("fetch_results") or []),
+                "coverage_summary": dict(merged_state.get("coverage_summary") or {}),
+                "backfill_attempts": int(merged_state.get("backfill_attempts") or 0),
+                "retrieval_failed": retrieval_failed,
                 "node_count": node_count,
                 "elapsed_seconds": elapsed,
                 "attempt_count": attempt_count,

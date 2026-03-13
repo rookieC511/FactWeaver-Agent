@@ -22,6 +22,7 @@ from core.config import (
     TAVILY_USD_PER_CREDIT,
 )
 from core.models import llm_vision
+from core.source_policy import annotate_search_results
 
 logger = logging.getLogger(__name__)
 
@@ -56,11 +57,20 @@ def default_cost_breakdown() -> dict[str, float | int]:
 def default_retrieval_metrics() -> dict[str, int]:
     return {
         "search_calls": 0,
+        "search_result_count": 0,
         "extract_calls": 0,
         "map_calls": 0,
         "crawl_calls": 0,
         "fallback_count": 0,
         "visual_browse_calls": 0,
+        "authority_hits": 0,
+        "weak_source_hits": 0,
+        "fetch_attempts": 0,
+        "blocked_fetches": 0,
+        "successful_authority_fetches": 0,
+        "high_value_evidence_count": 0,
+        "evidence_sections_total": 0,
+        "evidence_sections_covered": 0,
     }
 
 
@@ -420,7 +430,7 @@ class SearchClientRouter:
             try:
                 result = provider.search(query=query, max_results=max_results, search_depth=search_depth)
                 if result.get("results"):
-                    return result
+                    return {"results": annotate_search_results(result.get("results", []), query)}
             except ToolExecutionError as exc:
                 last_error = exc
                 logger.warning("Search provider %s failed: %s", provider.provider_name, exc)
@@ -438,7 +448,7 @@ class SearchClientRouter:
                     search_depth=search_depth,
                 )
                 if result.get("results"):
-                    return result
+                    return {"results": annotate_search_results(result.get("results", []), query)}
             except ToolExecutionError as exc:
                 last_error = exc
                 logger.warning("Search provider %s failed: %s", provider.provider_name, exc)
@@ -522,7 +532,31 @@ def heuristic_dom_probe(html_content: str, extracted_text: str) -> str | None:
     return None
 
 
-async def scrape_jina_ai(url: str) -> str:
+def _classify_fetch_error(*, status_code: int | None = None, content_type: str = "", message: str = "") -> str:
+    lowered_message = (message or "").lower()
+    lowered_type = (content_type or "").lower()
+    if status_code in (401, 403):
+        return "http_401_403"
+    if status_code == 412:
+        return "http_412"
+    if status_code == 429:
+        return "http_429"
+    if status_code == 404:
+        return "http_404"
+    if "ssl" in lowered_message or "certificate" in lowered_message:
+        return "ssl_error"
+    if "redirect" in lowered_message:
+        return "redirect_loop"
+    if "timed out" in lowered_message or "timeout" in lowered_message:
+        return "timeout"
+    if "javascript" in lowered_message or "vlm_required" in lowered_message:
+        return "js_only"
+    if "pdf" in lowered_type:
+        return "pdf_unreadable"
+    return "empty_content"
+
+
+async def fetch_url_with_pipeline(url: str) -> dict[str, Any]:
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -532,11 +566,22 @@ async def scrape_jina_ai(url: str) -> str:
         "Accept-Language": "en-US,en;q=0.5",
         "Referer": "https://www.google.com/",
     }
-    jina_status = 0
+    result = {
+        "provider": "",
+        "status": "failed",
+        "content": "",
+        "content_length": 0,
+        "final_url": url,
+        "error_class": "",
+        "http_status": 0,
+        "content_type": "",
+    }
     async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
         try:
             resp = await client.get(f"https://r.jina.ai/{url}", headers=headers)
-            jina_status = resp.status_code
+            result["http_status"] = resp.status_code
+            result["final_url"] = str(resp.url)
+            result["content_type"] = resp.headers.get("content-type", "")
             if resp.status_code == 200:
                 text = resp.text
                 if (
@@ -544,24 +589,38 @@ async def scrape_jina_ai(url: str) -> str:
                     and "Access Denied" not in text
                     and "Please wait while we verify you are a real person" not in text
                 ):
-                    return text
+                    result.update(
+                        {
+                            "provider": "jina",
+                            "status": "ok",
+                            "content": text,
+                            "content_length": len(text),
+                        }
+                    )
+                    return result
         except Exception as exc:
             logger.warning("Jina fetch failed for %s: %s", url, exc)
 
         try:
             fallback_resp = await client.get(url, headers=headers)
-            if fallback_resp.status_code in (403, 429, 500, 502, 503):
-                raise ToolExecutionError(
-                    "scrape_jina_ai",
-                    url,
-                    fallback_resp.status_code,
-                    f"Scraping blocked (Jina={jina_status}, Fallback={fallback_resp.status_code})",
+            result["http_status"] = fallback_resp.status_code
+            result["final_url"] = str(fallback_resp.url)
+            result["content_type"] = fallback_resp.headers.get("content-type", "")
+            if fallback_resp.status_code in (401, 403, 412, 429, 500, 502, 503):
+                result["error_class"] = _classify_fetch_error(
+                    status_code=fallback_resp.status_code,
+                    content_type=result["content_type"],
                 )
+                return result
+
             fallback_resp.raise_for_status()
+            if "pdf" in result["content_type"].lower():
+                result["error_class"] = "pdf_unreadable"
+                return result
+
             soup = BeautifulSoup(fallback_resp.text, "html.parser")
             for node in soup(["script", "style", "nav", "footer", "header"]):
                 node.extract()
-
             paragraphs = soup.find_all(["p", "h1", "h2", "h3", "h4", "li"])
             content_lines = []
             for paragraph in paragraphs:
@@ -569,16 +628,54 @@ async def scrape_jina_ai(url: str) -> str:
                 if len(text) > 20:
                     content_lines.append(text)
             fallback_text = "\n\n".join(content_lines) or soup.get_text(separator="\n", strip=True)
-
             probe_result = heuristic_dom_probe(fallback_resp.text, fallback_text)
             if probe_result:
-                return probe_result
-            return fallback_text
-        except ToolExecutionError:
-            raise
+                result.update(
+                    {
+                        "provider": "direct_http",
+                        "status": "needs_visual",
+                        "content": probe_result,
+                        "content_length": len(probe_result),
+                        "error_class": "js_only",
+                    }
+                )
+                return result
+
+            if not fallback_text or len(fallback_text.strip()) <= 120:
+                result["error_class"] = "empty_content"
+                return result
+
+            result.update(
+                {
+                    "provider": "direct_http",
+                    "status": "ok",
+                    "content": fallback_text,
+                    "content_length": len(fallback_text),
+                }
+            )
+            return result
         except Exception as exc:
             logger.error("Fallback scrape failed for %s: %s", url, exc)
-            return ""
+            result["error_class"] = _classify_fetch_error(
+                status_code=result["http_status"] or None,
+                content_type=str(result.get("content_type") or ""),
+                message=str(exc),
+            )
+            return result
+
+
+async def scrape_jina_ai(url: str) -> str:
+    fetched = await fetch_url_with_pipeline(url)
+    if fetched["status"] in {"ok", "needs_visual"}:
+        return str(fetched["content"])
+    if fetched.get("error_class") in {"http_401_403", "http_412", "http_429"}:
+        raise ToolExecutionError(
+            "scrape_jina_ai",
+            url,
+            int(fetched.get("http_status") or 403),
+            f"Scraping blocked ({fetched.get('error_class')})",
+        )
+    return ""
 
 
 def _normalize_json_like_text(raw_text: str) -> str:
