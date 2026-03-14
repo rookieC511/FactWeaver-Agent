@@ -58,6 +58,14 @@ ACADEMIC_HOST_HINTS = (
     "doi.org",
 )
 
+RESEARCH_FOUNDATION_HOST_HINTS = (
+    "aaafoundation.org",
+)
+
+STANDARDS_KB_HOST_HINTS = (
+    "wiki.unece.org",
+)
+
 IR_HINTS = (
     "investor",
     "annual report",
@@ -168,13 +176,20 @@ def classify_source(
     is_gov = host.endswith(".gov") or ".gov." in host or host.endswith(".gov.cn") or "court" in host
     is_edu = host.endswith(".edu") or host.endswith(".edu.cn") or ".ac." in host or _host_matches(host, ACADEMIC_HOST_HINTS)
     is_authority_media = _host_matches(host, AUTHORITY_HOST_HINTS)
+    is_research_foundation = _host_matches(host, RESEARCH_FOUNDATION_HOST_HINTS)
+    is_standards_kb = _host_matches(host, STANDARDS_KB_HOST_HINTS)
     is_ir = any(hint in lowered_title or hint in lowered_snippet or hint in _path(url) for hint in IR_HINTS)
+    is_academic_research = _host_matches(host, ACADEMIC_HOST_HINTS) or is_edu
 
     authority_score = 0.35
     if is_gov:
         authority_score += 0.7
     if is_edu:
         authority_score += 0.55
+    if is_research_foundation:
+        authority_score += 0.5
+    if is_standards_kb:
+        authority_score += 0.45
     if is_authority_media:
         authority_score += 0.35
     if is_ir:
@@ -189,16 +204,22 @@ def classify_source(
     if topic_family == "finance_business":
         if is_ir or is_gov or is_pdf:
             authority_score += 0.35
+        if is_academic_research or is_research_foundation or is_standards_kb:
+            authority_score += 0.2
         if is_social or is_aggregator:
             authority_score -= 0.2
     elif topic_family == "crime_law":
         if is_gov or "law" in host or "court" in host:
+            authority_score += 0.4
+        if is_academic_research or is_research_foundation or is_standards_kb:
             authority_score += 0.4
         if is_social or is_aggregator:
             authority_score -= 0.25
     elif topic_family == "education_jobs":
         if is_gov or is_edu:
             authority_score += 0.35
+        if is_academic_research or is_research_foundation or is_standards_kb:
+            authority_score += 0.25
         if is_social or is_aggregator:
             authority_score -= 0.2
 
@@ -213,7 +234,7 @@ def classify_source(
         "is_social": is_social,
         "is_aggregator": is_aggregator,
         "is_authority_media": is_authority_media,
-        "is_official": is_gov or is_edu or is_ir,
+        "is_official": is_gov or is_edu or is_ir or is_research_foundation or is_standards_kb,
     }
 
 
@@ -250,4 +271,3 @@ def rank_search_results(results: list[dict], query: str, *, limit: int | None = 
 
 def high_authority_only(results: list[dict]) -> list[dict]:
     return [item for item in results if str(item.get("source_tier")) == "high_authority"]
-

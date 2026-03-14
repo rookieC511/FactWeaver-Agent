@@ -114,6 +114,14 @@ checkpoints.sqlite3-shm
 checkpoints.sqlite3-wal
 _redis/
 
+# Generated benchmark / eval reports
+benchmark/benchmark_result.md
+eval/baseline_report.md
+eval/baseline_results.json
+eval/chunking_experiment_report.md
+tests/gaia_results.md
+tests/stress_test_report.md
+
 # Local benchmark / reverse-engineering repos
 temp_deepresearch_bench/
 legacy/old_benchmark_repo/

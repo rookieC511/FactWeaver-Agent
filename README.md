@@ -1,99 +1,123 @@
 # FactWeaver-Agent
 
-## 2026-03-12 Update
+面向长报告研究任务的 Deep Research Agent。
 
-- API submit path no longer calls `celery.send_task(...)` in the request thread.
-- New architecture: `SQLite task state + SQLite publish_outbox + in-process outbox publisher`.
-- `POST /research` / `POST /research/{task_id}/resume` now mean:
-  - task accepted and persisted
-  - publish to Redis/Celery happens asynchronously
-- `GET /research/{task_id}` now includes:
-  - `publish_status`
-  - `publish_attempt_count`
-  - `publish_last_error`
-  - `queued_at`
-- Public benchmark path is now split from the internal 10-query benchmark:
-  - internal: `scripts/benchmark_30_runs.py`
-  - public: `scripts/public_benchmark_deepsearchqa.py`
-  - submit latency smoke: `scripts/submit_latency_smoke.py`
+当前版本已经从早期的单体同步脚本，演进为一套可恢复、可排队、可评测、可控成本的研究系统，核心目标是：
 
-### Latest submit-path smoke
+- 生成有引用支撑的长报告
+- 支持 `low / medium / high` 三档检索模式
+- 支持任务排队、状态跟踪、恢复执行
+- 区分模型成本与外部检索成本
+- 用公开 benchmark 和内部 benchmark 持续做质量回归
 
-- Failure-mode smoke without a running Redis broker:
-  - report: `reports/submit_latency_smoke_20260312_133816.json`
-  - average submit latency: `31.4625 ms`
-  - P95 submit latency: `45.3463 ms`
-  - publish failure rate: `1.0`
-- Interpretation:
-  - request/response decoupling is working
-  - broker failure is now isolated to outbox publish state instead of blocking the API request
+## 当前架构
 
-工业级 Deep Research Agent。当前版本已经完成从“单体同步调用”到“队列化网关 + 持久化状态机 + 三档检索模式”的重构。
-
-## 当前版本
-
-- `V4.5`
-- 后端：`FastAPI + Celery/Redis + LangGraph + SQLite durable checkpoint`
+- 后端：`FastAPI + Celery + Redis + LangGraph`
+- 状态持久化：`SQLite`
 - 前端：`React + Vite`
-- 检索模式：`low / medium / high`
-- 成本统计：区分
-  - `llm_cost_rmb`
-  - `external_cost_usd_est`
+- 任务提交：`SQLite task state + SQLite publish_outbox + async outbox publisher`
+- 恢复能力：`checkpoint + task state + KnowledgeManager snapshot`
+- 默认检索档位：`medium`
 
 ## 核心能力
 
-- 队列化提交：API 只负责生成 `task_id` 并入队，不阻塞主线程
-- 持久化状态：任务状态、语义缓存、DLQ、LangGraph checkpoint 全部可持久化
-- 三档检索模式：
-  - `low`：`Serper + 轻量抓取`
-  - `medium`：`Serper + Tavily Extract`
-  - `high`：`Tavily Search + Map + Crawl + Extract`
-- 确定性降级：
-  - 坏 JSON 先走代码修复，不再让 LLM 自纠重试
-  - 工具失败走有限重试、缓存/跳过/缺口说明，不再让 LLM 决策是否重试
-- 会话隔离：每个任务独立 `KnowledgeManager`
-- 成本可观测：任务状态里直接返回模型成本和外部检索成本
+### 1. 队列化提交
 
-## 项目结构
+`POST /research` 不再在请求线程里同步调用 `celery.send_task(...)`。
 
-```text
-deepresearch-agent/
-├─ core/         # LangGraph 主流程、工具、模型、知识管理
-├─ gateway/      # FastAPI、Celery、状态存储
-├─ frontend/     # React 前端
-├─ scripts/      # benchmark、DLQ 管理、评测脚本
-├─ tests/        # 回归与模式测试
-├─ docs/         # AI context、架构说明
-└─ reports/      # 本地 benchmark 产物（默认忽略）
-```
+现在的提交语义是：
 
-## 三档模式
+- 任务已接受并持久化
+- 异步发布到 Celery/Redis
+- 前端可以立即拿到 `task_id`
 
-### `low`
+任务详情里会返回：
 
-- 目标：最低外部检索成本
-- 路径：`Serper basic -> scrape_jina_ai -> add_compact_document`
-- 特点：不走 Tavily 主链路，不走旧的长文 `aadd_document()` 抽取链
+- `publish_status`
+- `publish_attempt_count`
+- `publish_last_error`
+- `queued_at`
 
-### `medium`
+### 2. 可恢复执行
 
-- 目标：质量/成本平衡
-- 路径：`Serper basic -> Tavily Extract basic -> add_extracted_chunks`
-- fallback：`scrape_jina_ai -> add_compact_document`
-- 说明：这是当前默认模式
+支持显式恢复入口：
 
-### `high`
+- `POST /research/{task_id}/resume`
 
-- 目标：更高覆盖率与更强证据质量
-- 路径：`Tavily Search advanced -> Map -> Crawl -> Extract advanced`
-- fallback：`crawl raw_content` 或 `scrape_jina_ai`，必要时 `visual_browse`
-- 说明：当前不接 `Tavily Research`
+恢复不再只依赖 LangGraph checkpoint，而是同时恢复：
+
+- task state
+- latest checkpoint metadata
+- `KnowledgeManager` snapshot
+
+恢复相关状态字段包括：
+
+- `resume_count`
+- `resumed_from_checkpoint`
+- `last_checkpoint_id`
+- `last_checkpoint_node`
+- `interruption_state`
+
+### 3. 三档检索模式
+
+#### `low`
+
+低成本优先：
+
+- `Serper basic`
+- 轻量抓取
+- 不走 retrieval 侧长文抽取链
+
+适合预算最敏感场景。
+
+#### `medium`
+
+默认平衡档：
+
+- `Serper`
+- `Tavily Extract`
+- authority-first 检索与证据门控
+
+这是当前默认推荐模式。
+
+#### `high`
+
+高覆盖高成本档：
+
+- `Tavily Search`
+- `Map`
+- `Crawl`
+- `Extract`
+
+适合追求覆盖率和报告质量，但外部检索成本明显更高。
+
+## Evidence Acquisition 现状
+
+检索链已经从“搜到什么抓什么”收敛成显式的 Evidence Acquisition 流程：
+
+- 候选来源召回
+- 来源质量判断
+- 抓取编排与失败分类
+- 证据门控
+
+当前重点特性：
+
+- authority-first 检索
+- 高价值来源优先进入主证据集合
+- PDF blocked host 与非 PDF blocked host 分开处理
+- `retrieval_failed` 显式区分“没搜到”和“搜到了但抓不下来”
+
+当前已完成的第一轮专项优化：
+
+- PDF blocked 专项
+- `arxiv.org` / 学术 HTML host 可达性修复
+- `direct_answer_support_rate` 统计口径与 authority 判定修复
 
 ## API
 
 ### `POST /research`
 
-请求体：
+请求示例：
 
 ```json
 {
@@ -104,8 +128,9 @@ deepresearch-agent/
 
 ### `GET /research/{task_id}`
 
-返回任务状态与成本摘要，包括：
+返回内容包括：
 
+- `status`
 - `research_mode`
 - `llm_cost_rmb`
 - `external_cost_rmb_est`
@@ -113,49 +138,48 @@ deepresearch-agent/
 - `serper_queries`
 - `tavily_credits_est`
 - `elapsed_seconds`
+- `publish_status`
+- `resume_count`
 
-审计明细中仍保留：
+审计字段里仍保留：
 
 - `external_cost_usd_est`
 - `serper_cost_usd_est`
 - `tavily_cost_usd_est`
 
-## 环境变量
+## 前端
 
-最少需要：
+前端提供：
 
-```env
-OPENAI_API_KEY=...
-SERPER_API_KEY=...
-TAVILY_API_KEY=...
-```
+- 查询输入
+- 三档模式选择
+- 任务状态轮询
+- 成本与耗时摘要展示
 
-说明：
+入口文件：
 
-- 项目内部把 `OPENAI_API_KEY` 当作 SiliconFlow/OpenAI 兼容入口使用
-- `SERPER_API_KEY` 用于 `low` 和 `medium` 的主搜索链路
-- `TAVILY_API_KEY` 用于 `medium/high` 的抽取与高阶检索链路
-
-可选：
-
-```env
-REDIS_BROKER_URL=redis://localhost:6379/0
-REDIS_RESULT_BACKEND=redis://localhost:6379/1
-DEFAULT_RESEARCH_MODE=medium
-MAX_TASK_DURATION_SECONDS=300
-MAX_TASK_NODE_COUNT=15
-MAX_TASK_RMB_COST=1.0
-```
+- [frontend/src/App.tsx](frontend/src/App.tsx)
+- [frontend/src/components/SearchBar.tsx](frontend/src/components/SearchBar.tsx)
+- [frontend/src/components/StatusMonitor.tsx](frontend/src/components/StatusMonitor.tsx)
 
 ## 本地启动
 
-### 1. 安装 Python 依赖
+### 1. 安装依赖
+
+Python：
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. 启动 Redis 和 Celery Worker
+前端：
+
+```bash
+cd frontend
+npm install
+```
+
+### 2. 启动 Redis 和 Celery
 
 ```bash
 celery -A gateway.tasks worker -l info
@@ -171,98 +195,115 @@ uvicorn gateway.api:app --host 0.0.0.0 --port 8000 --reload
 
 ```bash
 cd frontend
-npm install
 npm run dev
 ```
 
-## 验证命令
+## 环境变量
 
-```bash
-python verify_modules.py
-pytest tests/test_research_modes.py -q
-pytest tests/test_review_logic.py -q
-pytest tests/test_chart_integration.py -q
+至少需要：
+
+```env
+OPENAI_API_KEY=...
+SERPER_API_KEY=...
+TAVILY_API_KEY=...
 ```
 
-## 成本基准
+常用可选项：
 
-基准脚本：
-
-```bash
-python scripts/benchmark_modes.py
+```env
+REDIS_BROKER_URL=redis://localhost:6379/0
+REDIS_RESULT_BACKEND=redis://localhost:6379/1
+DEFAULT_RESEARCH_MODE=medium
+MAX_TASK_DURATION_SECONDS=300
+MAX_TASK_NODE_COUNT=15
+MAX_TASK_RMB_COST=1.0
 ```
 
-为了避免一次性烧穿余额，脚本内置双层熔断：
+## 评测与 Benchmark
 
-- `BENCHMARK_MAX_TASK_RMB`
-- `BENCHMARK_MAX_TOTAL_RMB`
+项目当前分两条评测线：
 
-并支持：
+### 1. 内部 benchmark
 
-- `BENCHMARK_QUERY_LIMIT`
-- `BENCHMARK_MODES`
+用于模式、成本、稳定性和长报告质量回归。
 
-示例：
+典型脚本：
 
-```bash
-BENCHMARK_MAX_TASK_RMB=0.60
-BENCHMARK_MAX_TOTAL_RMB=3.00
-BENCHMARK_QUERY_LIMIT=1
-python scripts/benchmark_modes.py
-```
-
-## 这次真实成本测试结论
-
-说明：以下数据来自 `2026-03-11` 的完整 `3 queries x 3 modes` 离线重评分结果。原始运行已启用预算熔断 `BENCHMARK_MAX_TASK_RMB=0.60`、`BENCHMARK_MAX_TOTAL_RMB=3.00`；本次只做离线人民币换算和质量评分，不新增模型或检索花费。
-
-| Mode | Avg LLM Cost (RMB) | Avg External Cost (RMB) | Avg Total Cost (RMB) | FACT/RACE Quality | Value Score | Overall Score | Avg Time (s) |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| low | 0.0804 | 0.1008 | 0.1812 | 7.49 | 8.68 | 7.85 | 574.25 |
-| medium | 0.1119 | 0.7416 | 0.8535 | 8.90 | 2.14 | 6.87 | 434.85 |
-| high | 0.1467 | 2.9568 | 3.1035 | 8.90 | 0.80 | 6.47 | 682.87 |
-
-本批 `9` 轮合计成本：
-
-- `LLM Cost = 1.0170 RMB`
-- `External Cost = 11.3976 RMB`
-- `Total Cost = 12.4146 RMB`
-
-- 默认推荐档位：`medium`
-- 质量最高档位：`high`
-- 性价比最高档位：`low`
-- 最慢且最贵档位：`high`
-- 当前评分口径：`quality_score = 0.55 * FACT + 0.45 * RACE`，`overall_score = 0.70 * quality + 0.30 * value`
-
-## 当前结论
-
-- 默认推荐 `medium`
-- `low` 最省外部检索成本，但不一定最快
-- `high` 的报告质量最高，但 Tavily 外部检索成本明显更高
-- 全量 benchmark 必须带预算熔断，不建议裸跑
-
-## 文档
-
-- 架构上下文：[docs/AI_CONTEXT.md](docs/AI_CONTEXT.md)
-- 本轮改造说明：[docs/architecture_alignment_v44.md](docs/architecture_alignment_v44.md)
-- 面试架构表述：[docs/INTERVIEW_GRAPH_ARCHITECTURE.md](docs/INTERVIEW_GRAPH_ARCHITECTURE.md)
-
-## 2026-03-11 新增能力
-
-- 显式恢复入口：
-  - `POST /research/{task_id}/resume`
-- 恢复链路从“只有 checkpoint”升级为：
-  - `checkpoint + task state + KnowledgeManager snapshot`
-- writer 子图现在也支持 checkpoint，因此恢复安全点覆盖到：
-  - `planner` 后
-  - `executor` 后
-  - `writer.section_writer` fan-in 完成后、`editor` 开始前
-- benchmark 默认本地 judge 已切到：
-  - `qwen3:8b`
-  - fallback 为 `llama3.1:latest`
-
-对应脚本：
+- `python scripts/benchmark_modes.py`
 - `python scripts/judge_bakeoff.py`
 - `python scripts/recovery_benchmark.py`
 - `python scripts/concurrency_probe.py`
 - `python scripts/cost_ab_experiment.py`
-- `python scripts/benchmark_30_runs.py`
+
+### 2. 公开 benchmark
+
+当前主线是本地兼容的 `DeepResearch Bench` 风格长报告评测，不是官方 leaderboard 成绩。
+
+核心脚本：
+
+- `python scripts/public_benchmark_deepresearch_bench.py`
+- `python scripts/deepresearch_bench_scoring.py`
+
+评分关注：
+
+- `drb_report_score`
+- `fact_score`
+- `comprehensiveness`
+- `insight`
+- `instruction_following`
+- `readability`
+
+额外诊断指标：
+
+- `blocked_source_rate`
+- `blocked_attempt_rate`
+- `authority_source_rate`
+- `weak_source_hit_rate`
+- `direct_answer_support_rate`
+- `retrieval_failed`
+
+## 最新小样本结论
+
+以下不是官方榜单成绩，而是当前本地兼容公开 benchmark 的最新 `3` 题 pilot：
+
+- `avg_drb_report_score = 7.0553`
+- `avg_fact_score = 8.4`
+- `direct_answer_support_rate = 0.8333`
+- `blocked_source_rate = 0.0`
+- `retrieval_failed = 1/3`
+
+这说明：
+
+- 第一轮 blocked/access 优化是有效的
+- 系统已经不再主要卡在 PDF 或 `arxiv` 可达性
+- 当前剩余瓶颈开始收敛到“高权威证据覆盖仍不够完整”
+
+## 验证命令
+
+常用回归：
+
+```bash
+python verify_modules.py
+pytest tests/test_research_modes.py -q
+pytest tests/test_benchmark_scoring.py -q
+pytest tests/test_deepresearch_bench.py -q
+pytest tests/test_evidence_acquisition.py -q
+pytest tests/test_writer_graph.py -q
+```
+
+## 文档
+
+- 架构上下文：[docs/AI_CONTEXT.md](docs/AI_CONTEXT.md)
+- Benchmark 归档：[docs/benchmarks](docs/benchmarks)
+- 历史决策归档：[docs/adr](docs/adr)
+
+## 当前判断
+
+- 默认档位仍然是 `medium`
+- 第一轮检索可达性优化已经完成
+- 当前下一阶段主瓶颈不是 writer 报错，也不是 PDF blocked
+- 下一步更适合继续打：
+  - 高权威 evidence slot 覆盖
+  - `retrieval_failed`
+  - `authority_source_rate`
+  - `weak_source_hit_rate`

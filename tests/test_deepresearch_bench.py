@@ -228,3 +228,61 @@ def test_score_deepresearch_result_can_require_local_judge(monkeypatch):
             },
             require_local_judge=True,
         )
+
+
+def test_summarize_deepresearch_results_ignores_missing_coverage_for_support_rate(monkeypatch):
+    monkeypatch.setattr(
+        drb_scoring,
+        "score_deepresearch_result",
+        lambda item, judge_model=None, allow_local_judge=True, require_local_judge=False: item,
+    )
+    payload = drb_scoring.summarize_deepresearch_results(
+        {
+            "stage": "pilot",
+            "results": [
+                {
+                    "status": "SUCCESS",
+                    "language": "en",
+                    "topic": "Law",
+                    "drb_report_score": 7.0,
+                    "fact_score": 6.5,
+                    "dimension_scores": {key: 7.0 for key in drb_scoring.DIMENSIONS},
+                    "failure_tags": [],
+                    "llm_cost_rmb": 0.1,
+                    "external_cost_rmb_est": 0.2,
+                    "total_cost_rmb_est": 0.3,
+                    "elapsed_seconds": 10.0,
+                    "task_clause_coverage_rate": 1.0,
+                    "direct_answer_support_rate": 0.8,
+                    "blocked_source_rate": 0.0,
+                    "blocked_attempt_rate": 0.2,
+                    "authority_source_rate": 0.4,
+                    "weak_source_hit_rate": 0.2,
+                },
+                {
+                    "status": "FAILED",
+                    "language": "zh",
+                    "topic": "Finance",
+                    "drb_report_score": 6.0,
+                    "fact_score": 6.0,
+                    "dimension_scores": {key: 6.0 for key in drb_scoring.DIMENSIONS},
+                    "failure_tags": ["retrieval_miss"],
+                    "llm_cost_rmb": 0.1,
+                    "external_cost_rmb_est": 0.2,
+                    "total_cost_rmb_est": 0.3,
+                    "elapsed_seconds": 10.0,
+                    "task_clause_coverage_rate": 0.5,
+                    "direct_answer_support_rate": None,
+                    "blocked_source_rate": None,
+                    "blocked_attempt_rate": None,
+                    "authority_source_rate": None,
+                    "weak_source_hit_rate": None,
+                },
+            ],
+        }
+    )
+    summary = payload["summary"]
+    assert summary["coverage_averages"]["direct_answer_support_rate"] == 0.8
+    assert summary["coverage_averages"]["blocked_source_rate"] == 0.0
+    assert summary["coverage_metric_sample_size"] == 1
+    assert summary["coverage_metric_missing_count"] == 1

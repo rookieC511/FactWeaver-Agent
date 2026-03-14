@@ -35,3 +35,34 @@ def test_rank_search_results_boosts_authority_sources():
     )
     assert ranked[0]["url"].startswith("https://www.sec.gov")
     assert ranked[0]["source_tier"] == "high_authority"
+
+
+def test_classify_source_boosts_strict_topic_academic_and_foundation_hosts():
+    arxiv_meta = classify_source(
+        "https://arxiv.org/html/2404.17044v1",
+        title="Research paper",
+        snippet="scholarly study",
+        query="California autonomous driving liability law and crash accountability",
+    )
+    foundation_meta = classify_source(
+        "https://aaafoundation.org/driver-safety-study",
+        title="Driver safety study",
+        snippet="research foundation report",
+        query="California autonomous driving liability law and crash accountability",
+    )
+    edu_meta = classify_source(
+        "https://users.ece.cmu.edu/~koopman/j3016/",
+        title="CMU reference",
+        snippet="academic reference page",
+        query="California autonomous driving liability law and crash accountability",
+    )
+    law_meta = classify_source(
+        "https://leginfo.legislature.ca.gov/faces/codes_displaySection.xhtml",
+        title="California legislative code",
+        snippet="official statute",
+        query="California autonomous driving liability law and crash accountability",
+    )
+    assert arxiv_meta["source_tier"] == "high_authority"
+    assert foundation_meta["source_tier"] == "high_authority"
+    assert edu_meta["source_tier"] == "high_authority"
+    assert law_meta["source_tier"] == "high_authority"

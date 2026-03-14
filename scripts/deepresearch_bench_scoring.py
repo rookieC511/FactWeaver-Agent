@@ -53,6 +53,22 @@ DIMENSIONS = (
     "instruction_following",
     "readability",
 )
+COVERAGE_METRIC_FIELDS = (
+    "authority_source_rate",
+    "blocked_source_rate",
+    "blocked_attempt_rate",
+    "blocked_non_pdf_rate",
+    "successful_authority_fetch_rate",
+    "weak_source_hit_rate",
+    "high_value_evidence_count",
+    "evidence_coverage_rate",
+    "direct_answer_support_rate",
+    "backfill_success_rate",
+    "same_host_backfill_success_rate",
+    "blocked_after_same_host_backfill",
+    "pdf_parser_salvage_rate",
+    "visual_fallback_salvage_rate",
+)
 ANALYSIS_SIGNAL_MAP = {
     "comparison": ("compare", "versus", "vs", "better than", "relative to", "comparison", "相比", "对比"),
     "causal": ("because", "driven by", "caused by", "due to", "therefore", "原因", "导致", "因为"),
@@ -62,6 +78,20 @@ ANALYSIS_SIGNAL_MAP = {
 
 def _clamp_score(value: float, low: float = 1.0, high: float = 10.0) -> float:
     return round(max(low, min(high, value)), 2)
+
+
+def _coverage_value(coverage_summary: dict[str, Any], key: str) -> float | int | None:
+    if key not in coverage_summary:
+        return None
+    value = coverage_summary.get(key)
+    if value is None:
+        return None
+    try:
+        if key in {"high_value_evidence_count", "blocked_after_same_host_backfill"}:
+            return int(value)
+        return float(value)
+    except Exception:
+        return None
 
 
 def _extract_dimension_scores_from_payload(parsed: dict[str, Any]) -> dict[str, float] | None:
@@ -466,34 +496,13 @@ def score_deepresearch_result(
             "writer_transient_error_count": int(draft_audit.get("writer_transient_error_count", 0)),
             "writer_section_fallback_count": int(draft_audit.get("writer_section_fallback_count", 0)),
             "writer_section_fallback_used": bool(draft_audit.get("writer_section_fallback_used", False)),
-            "authority_source_rate": float((fact_scored.get("coverage_summary") or {}).get("authority_source_rate", 0.0)),
-            "blocked_source_rate": float((fact_scored.get("coverage_summary") or {}).get("blocked_source_rate", 0.0)),
-            "blocked_non_pdf_rate": float((fact_scored.get("coverage_summary") or {}).get("blocked_non_pdf_rate", 0.0)),
-            "successful_authority_fetch_rate": float(
-                (fact_scored.get("coverage_summary") or {}).get("successful_authority_fetch_rate", 0.0)
-            ),
-            "weak_source_hit_rate": float((fact_scored.get("coverage_summary") or {}).get("weak_source_hit_rate", 0.0)),
-            "high_value_evidence_count": int((fact_scored.get("coverage_summary") or {}).get("high_value_evidence_count", 0)),
-            "evidence_coverage_rate": float((fact_scored.get("coverage_summary") or {}).get("evidence_coverage_rate", 0.0)),
-            "direct_answer_support_rate": float(
-                (fact_scored.get("coverage_summary") or {}).get("direct_answer_support_rate", 0.0)
-            ),
-            "backfill_success_rate": float((fact_scored.get("coverage_summary") or {}).get("backfill_success_rate", 0.0)),
-            "same_host_backfill_success_rate": float(
-                (fact_scored.get("coverage_summary") or {}).get("same_host_backfill_success_rate", 0.0)
-            ),
-            "blocked_after_same_host_backfill": int(
-                (fact_scored.get("coverage_summary") or {}).get("blocked_after_same_host_backfill", 0)
-            ),
             "blocked_by_provider": dict((fact_scored.get("coverage_summary") or {}).get("blocked_by_provider") or {}),
             "blocked_by_page_type": dict((fact_scored.get("coverage_summary") or {}).get("blocked_by_page_type") or {}),
             "blocked_by_host": dict((fact_scored.get("coverage_summary") or {}).get("blocked_by_host") or {}),
-            "pdf_parser_salvage_rate": float(
-                (fact_scored.get("coverage_summary") or {}).get("pdf_parser_salvage_rate", 0.0)
-            ),
-            "visual_fallback_salvage_rate": float(
-                (fact_scored.get("coverage_summary") or {}).get("visual_fallback_salvage_rate", 0.0)
-            ),
+            **{
+                field: _coverage_value(dict(fact_scored.get("coverage_summary") or {}), field)
+                for field in COVERAGE_METRIC_FIELDS
+            },
         }
     )
     return fact_scored
@@ -522,6 +531,20 @@ def summarize_deepresearch_results(
     allow_local_judge: bool = True,
     require_local_judge: bool = False,
 ) -> dict[str, Any]:
+    def _mean_present(metric: str) -> tuple[float | None, int]:
+        values: list[float] = []
+        for item in scored_results:
+            value = item.get(metric)
+            if value is None:
+                continue
+            try:
+                values.append(float(value))
+            except Exception:
+                continue
+        if not values:
+            return None, 0
+        return round(mean(values), 4), len(values)
+
     scored_results = [
         score_deepresearch_result(
             item,
@@ -589,57 +612,20 @@ def summarize_deepresearch_results(
         if scored_results
         else 0.0,
     }
-    coverage_averages = {
-        "authority_source_rate": round(mean([float(item.get("authority_source_rate") or 0.0) for item in scored_results]), 4)
-        if scored_results
-        else 0.0,
-        "blocked_source_rate": round(mean([float(item.get("blocked_source_rate") or 0.0) for item in scored_results]), 4)
-        if scored_results
-        else 0.0,
-        "blocked_non_pdf_rate": round(mean([float(item.get("blocked_non_pdf_rate") or 0.0) for item in scored_results]), 4)
-        if scored_results
-        else 0.0,
-        "successful_authority_fetch_rate": round(
-            mean([float(item.get("successful_authority_fetch_rate") or 0.0) for item in scored_results]), 4
-        )
-        if scored_results
-        else 0.0,
-        "weak_source_hit_rate": round(mean([float(item.get("weak_source_hit_rate") or 0.0) for item in scored_results]), 4)
-        if scored_results
-        else 0.0,
-        "high_value_evidence_count": round(mean([float(item.get("high_value_evidence_count") or 0.0) for item in scored_results]), 4)
-        if scored_results
-        else 0.0,
-        "evidence_coverage_rate": round(mean([float(item.get("evidence_coverage_rate") or 0.0) for item in scored_results]), 4)
-        if scored_results
-        else 0.0,
-        "direct_answer_support_rate": round(
-            mean([float(item.get("direct_answer_support_rate") or 0.0) for item in scored_results]), 4
-        )
-        if scored_results
-        else 0.0,
-        "backfill_success_rate": round(mean([float(item.get("backfill_success_rate") or 0.0) for item in scored_results]), 4)
-        if scored_results
-        else 0.0,
-        "same_host_backfill_success_rate": round(
-            mean([float(item.get("same_host_backfill_success_rate") or 0.0) for item in scored_results]), 4
-        )
-        if scored_results
-        else 0.0,
-        "pdf_parser_salvage_rate": round(mean([float(item.get("pdf_parser_salvage_rate") or 0.0) for item in scored_results]), 4)
-        if scored_results
-        else 0.0,
-        "visual_fallback_salvage_rate": round(
-            mean([float(item.get("visual_fallback_salvage_rate") or 0.0) for item in scored_results]), 4
-        )
-        if scored_results
-        else 0.0,
-        "blocked_after_same_host_backfill": round(
-            mean([float(item.get("blocked_after_same_host_backfill") or 0.0) for item in scored_results]), 4
-        )
-        if scored_results
-        else 0.0,
+    coverage_metric_stats = {
+        metric: _mean_present(metric)
+        for metric in COVERAGE_METRIC_FIELDS
     }
+    coverage_sample_sizes = {
+        metric: stats[1]
+        for metric, stats in coverage_metric_stats.items()
+    }
+    coverage_averages = {
+        metric: (stats[0] if stats[0] is not None else 0.0)
+        for metric, stats in coverage_metric_stats.items()
+    }
+    coverage_metric_sample_size = coverage_sample_sizes.get("direct_answer_support_rate", 0)
+    coverage_metric_missing_count = max(0, len(scored_results) - coverage_metric_sample_size)
     blocked_by_provider = Counter()
     blocked_by_page_type = Counter()
     blocked_by_host = Counter()
@@ -676,6 +662,8 @@ def summarize_deepresearch_results(
         "dimension_averages": dimension_averages,
         "audit_averages": audit_averages,
         "coverage_averages": coverage_averages,
+        "coverage_metric_sample_size": coverage_metric_sample_size,
+        "coverage_metric_missing_count": coverage_metric_missing_count,
         "weakest_dimension": weakest_dimension,
         "language_distribution": Counter(_normalize_language(str(item.get("language"))) for item in scored_results),
         "topic_distribution": Counter(str(item.get("topic") or "unknown") for item in scored_results),
@@ -743,6 +731,8 @@ def write_deepresearch_report(payload: dict[str, Any], output_dir: str | Path | 
         f"- Avg Elapsed (s): `{summary.get('avg_elapsed_seconds', 0.0)}`",
         f"- Avg Task Clause Coverage Rate: `{summary.get('avg_task_clause_coverage_rate', 0.0)}`",
         f"- Weakest Dimension: `{summary.get('weakest_dimension', '')}`",
+        f"- Coverage Metric Sample Size: `{summary.get('coverage_metric_sample_size', 0)}`",
+        f"- Coverage Metric Missing Count: `{summary.get('coverage_metric_missing_count', 0)}`",
         f"- Gate Passed: `{summary.get('gate', {}).get('passed', False)}`",
         "",
         "## Dimension Averages",
@@ -764,6 +754,7 @@ def write_deepresearch_report(payload: dict[str, Any], output_dir: str | Path | 
     for key in (
         "authority_source_rate",
         "blocked_source_rate",
+        "blocked_attempt_rate",
         "blocked_non_pdf_rate",
         "successful_authority_fetch_rate",
         "weak_source_hit_rate",
@@ -800,6 +791,7 @@ def write_deepresearch_report(payload: dict[str, Any], output_dir: str | Path | 
                 f"- Direct Answer Present: `{item.get('direct_answer_present')}`",
                 f"- Analysis Signal Count: `{item.get('analysis_signal_count')}`",
                 f"- Blocked Source Rate: `{item.get('blocked_source_rate')}`",
+                f"- Blocked Attempt Rate: `{item.get('blocked_attempt_rate')}`",
                 f"- Blocked Non-PDF Rate: `{item.get('blocked_non_pdf_rate')}`",
                 f"- Retrieval Failed: `{item.get('retrieval_failed')}`",
                 f"- Writer Section Fallback Count: `{item.get('writer_section_fallback_count')}`",

@@ -244,6 +244,11 @@ HTML_ALT_PATH_HINTS = (
 NON_PDF_FORCE_ACCESS_BACKFILL_HOSTS = {
     "www.wshblaw.com",
 }
+EXTRACT_FIRST_NON_PDF_HOSTS = {
+    "arxiv.org",
+    "doi.org",
+    "aaafoundation.org",
+}
 
 
 def _host(url: str) -> str:
@@ -727,9 +732,11 @@ async def _attempt_visual(
         )
 
 
-def _main_provider_order(page_type: str) -> list[str]:
+def _main_provider_order(page_type: str, host: str) -> list[str]:
     if page_type in {"pdf", "filing"}:
         return ["pdf_parser", "tavily_extract"]
+    if host in EXTRACT_FIRST_NON_PDF_HOSTS:
+        return ["tavily_extract", "direct_http"]
     if page_type == "official_html":
         return ["direct_http", "tavily_extract", "jina"]
     return ["jina", "direct_http"]
@@ -763,7 +770,7 @@ async def fetch_source_candidate(
     final_attempt: FetchAttempt | None = None
     credits_est = 0.0
 
-    for attempt_order, provider in enumerate(_main_provider_order(page_type), start=1):
+    for attempt_order, provider in enumerate(_main_provider_order(page_type, host), start=1):
         if provider == "pdf_parser":
             attempt, content = await _attempt_pdf_parser(
                 url,

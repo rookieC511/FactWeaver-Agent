@@ -37,6 +37,10 @@ def _is_blocked_fetch(item: dict[str, Any]) -> bool:
     return str(item.get("error_class") or "") in BLOCKED_ERROR_CLASSES
 
 
+def _is_pdf_page_type(page_type: str) -> bool:
+    return str(page_type or "") in {"pdf", "filing"}
+
+
 def build_evidence_slots(
     *,
     task_contract: dict[str, Any],
@@ -115,26 +119,9 @@ def compute_coverage_summary(
     if fetch_attempt_rows:
         fetch_attempts = len(fetch_attempt_rows)
         blocked_fetches = sum(1 for item in fetch_attempt_rows if _is_blocked_fetch(item))
-        non_pdf_attempts = sum(
-            1 for item in fetch_attempt_rows if str(item.get("page_type") or "") not in {"pdf", "filing"}
-        )
-        blocked_non_pdf = sum(
-            1
-            for item in fetch_attempt_rows
-            if str(item.get("page_type") or "") not in {"pdf", "filing"} and _is_blocked_fetch(item)
-        )
     else:
         blocked_fetches = int(retrieval_metrics.get("blocked_fetches", 0))
         fetch_attempts = max(1, int(retrieval_metrics.get("fetch_attempts", 0)))
-        non_pdf_attempts = max(1, fetch_attempts)
-        blocked_non_pdf = blocked_fetches
-    successful_authority_fetches = int(retrieval_metrics.get("successful_authority_fetches", 0))
-    total_sections = max(1, len(section_ids))
-    direct_answer_supported = sum(
-        1
-        for slot in evidence_slots.values()
-        if slot.get("covered") and int(slot.get("high_authority_source_count") or 0) >= 1
-    )
     blocked_by_provider = Counter()
     blocked_by_page_type = Counter()
     blocked_by_host = Counter()
@@ -156,11 +143,46 @@ def compute_coverage_summary(
             visual_attempts += 1
             if str(item.get("status") or "") == "ok":
                 visual_successes += 1
-        if not _is_blocked_fetch(item):
+
+    total_urls = len(by_url)
+    total_non_pdf_urls = 0
+    blocked_urls = 0
+    blocked_non_pdf_urls = 0
+    for url, attempts in by_url.items():
+        page_types = [str(item.get("page_type") or "") for item in attempts]
+        is_non_pdf_url = any(not _is_pdf_page_type(page_type) for page_type in page_types)
+        if is_non_pdf_url:
+            total_non_pdf_urls += 1
+        has_success = any(str(item.get("status") or "") == "ok" for item in attempts)
+        blocked_attempts = [item for item in attempts if _is_blocked_fetch(item)]
+        if not blocked_attempts:
             continue
-        blocked_by_provider[provider or "unknown"] += 1
-        blocked_by_page_type[str(item.get("page_type") or "unknown")] += 1
-        blocked_by_host[str(item.get("host") or "unknown")] += 1
+        blocked_attempt = blocked_attempts[0]
+        page_type = str(blocked_attempt.get("page_type") or "unknown")
+        if has_success:
+            continue
+        blocked_urls += 1
+        blocked_by_provider[str(blocked_attempt.get("provider") or "unknown")] += 1
+        blocked_by_page_type[page_type] += 1
+        blocked_by_host[str(blocked_attempt.get("host") or "unknown")] += 1
+        if is_non_pdf_url:
+            blocked_non_pdf_urls += 1
+
+    if fetch_attempt_rows:
+        blocked_attempt_rate = round(blocked_fetches / fetch_attempts, 4)
+        blocked_source_rate = round(blocked_urls / max(1, total_urls), 4)
+        blocked_non_pdf_rate = round(blocked_non_pdf_urls / max(1, total_non_pdf_urls), 4) if total_non_pdf_urls else 0.0
+    else:
+        blocked_attempt_rate = round(blocked_fetches / fetch_attempts, 4)
+        blocked_source_rate = blocked_attempt_rate
+        blocked_non_pdf_rate = blocked_attempt_rate
+    successful_authority_fetches = int(retrieval_metrics.get("successful_authority_fetches", 0))
+    total_sections = max(1, len(section_ids))
+    direct_answer_supported = sum(
+        1
+        for slot in evidence_slots.values()
+        if slot.get("covered") and int(slot.get("high_authority_source_count") or 0) >= 1
+    )
 
     blocked_after_jina_but_direct_ok = 0
     blocked_after_direct_http = 0
@@ -174,8 +196,9 @@ def compute_coverage_summary(
             blocked_after_direct_http += 1
     return {
         "authority_source_rate": round(authority_hits / search_result_count, 4),
-        "blocked_source_rate": round(blocked_fetches / fetch_attempts, 4),
-        "blocked_non_pdf_rate": round(blocked_non_pdf / max(1, non_pdf_attempts), 4),
+        "blocked_source_rate": blocked_source_rate,
+        "blocked_attempt_rate": blocked_attempt_rate,
+        "blocked_non_pdf_rate": blocked_non_pdf_rate,
         "high_value_evidence_count": high_value_evidence_count,
         "evidence_coverage_rate": round(covered_sections / total_sections, 4),
         "weak_source_hit_rate": round(weak_hits / search_result_count, 4),

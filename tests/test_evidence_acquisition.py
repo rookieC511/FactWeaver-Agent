@@ -263,13 +263,119 @@ def test_compute_coverage_summary_aggregates_blocked_breakdown():
             },
         ],
     )
-    assert coverage["blocked_source_rate"] == 0.25
-    assert coverage["blocked_by_provider"]["jina"] == 1
-    assert coverage["blocked_by_page_type"]["general_html"] == 1
-    assert coverage["blocked_by_host"]["a.example.com"] == 1
+    assert coverage["blocked_attempt_rate"] == 0.25
+    assert coverage["blocked_source_rate"] == 0.0
+    assert coverage["blocked_by_provider"] == {}
+    assert coverage["blocked_by_page_type"] == {}
+    assert coverage["blocked_by_host"] == {}
     assert coverage["blocked_after_jina_but_direct_ok"] == 1
     assert coverage["pdf_parser_salvage_rate"] == 1.0
     assert coverage["visual_fallback_salvage_rate"] == 1.0
+
+
+def test_compute_coverage_summary_counts_unsalvaged_host_as_blocked_source():
+    km = DummyKM({})
+    coverage = compute_coverage_summary(
+        plan=[{"section_id": "1"}],
+        km=km,
+        retrieval_metrics={"search_result_count": 2, "authority_hits": 1, "weak_source_hits": 0},
+        evidence_slots={},
+        fetch_results=[
+            {
+                "url": "https://arxiv.org/html/2404.17044v1",
+                "provider": "direct_http",
+                "page_type": "js_heavy",
+                "host": "arxiv.org",
+                "status": "needs_visual",
+                "error_class": "js_only",
+            },
+            {
+                "url": "https://arxiv.org/html/2404.17044v1",
+                "provider": "tavily_extract",
+                "page_type": "official_html",
+                "host": "arxiv.org",
+                "status": "ok",
+                "error_class": "",
+            },
+            {
+                "url": "https://blocked.example.com/article",
+                "provider": "direct_http",
+                "page_type": "official_html",
+                "host": "blocked.example.com",
+                "status": "failed",
+                "error_class": "http_401_403",
+            },
+        ],
+    )
+    assert coverage["blocked_attempt_rate"] == 0.6667
+    assert coverage["blocked_source_rate"] == 0.5
+    assert coverage["blocked_by_host"] == {"blocked.example.com": 1}
+
+
+@pytest.mark.asyncio
+async def test_fetch_source_candidate_prefers_extract_for_arxiv_host(monkeypatch):
+    import core.evidence_acquisition.fetch_pipeline as pipeline
+
+    calls = []
+
+    async def fake_tavily(url, **kwargs):
+        calls.append("tavily_extract")
+        return (
+            {
+                "provider": "tavily_extract",
+                "status": "ok",
+                "content_length": 600,
+                "final_url": url,
+                "error_class": "",
+                "http_status": 200,
+                "content_type": "text/html",
+                "attempt_order": kwargs["attempt_order"],
+                "page_type": kwargs["page_type"],
+                "host": kwargs["host"],
+                "salvaged_by_fallback": False,
+                "blocked_stage": "",
+                "authority_preserved": kwargs["authority_preserved"],
+            },
+            "paper content " * 80,
+            0.0,
+        )
+
+    async def fake_direct(url, **kwargs):
+        calls.append("direct_http")
+        return (
+            {
+                "provider": "direct_http",
+                "status": "failed",
+                "content_length": 0,
+                "final_url": url,
+                "error_class": "js_only",
+                "http_status": 200,
+                "content_type": "text/html",
+                "attempt_order": kwargs["attempt_order"],
+                "page_type": kwargs["page_type"],
+                "host": kwargs["host"],
+                "salvaged_by_fallback": False,
+                "blocked_stage": "direct_http",
+                "authority_preserved": kwargs["authority_preserved"],
+            },
+            "",
+        )
+
+    monkeypatch.setattr(pipeline, "_attempt_tavily_extract", fake_tavily)
+    monkeypatch.setattr(pipeline, "_attempt_direct_http", fake_direct)
+
+    fetched = await fetch_source_candidate(
+        {
+            "url": "https://arxiv.org/html/2404.17044v1",
+            "host": "arxiv.org",
+            "source_tier": "high_authority",
+            "is_official": True,
+        },
+        allow_visual=False,
+        goal="ADAS liability analysis",
+    )
+    assert calls == ["tavily_extract"]
+    assert fetched["status"] == "ok"
 
 
 @pytest.mark.asyncio
