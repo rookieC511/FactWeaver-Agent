@@ -54,7 +54,7 @@ def default_cost_breakdown() -> dict[str, float | int]:
     }
 
 
-def default_retrieval_metrics() -> dict[str, int]:
+def default_retrieval_metrics() -> dict[str, float | int]:
     return {
         "search_calls": 0,
         "search_result_count": 0,
@@ -71,6 +71,10 @@ def default_retrieval_metrics() -> dict[str, int]:
         "high_value_evidence_count": 0,
         "evidence_sections_total": 0,
         "evidence_sections_covered": 0,
+        "retrieval_recall_wall_seconds": 0.0,
+        "access_backfill_wall_seconds": 0.0,
+        "targeted_backfill_wall_seconds": 0.0,
+        "evidence_acquisition_wall_seconds": 0.0,
     }
 
 

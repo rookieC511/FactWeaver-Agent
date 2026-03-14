@@ -226,7 +226,15 @@ def test_compute_coverage_summary_aggregates_blocked_breakdown():
     coverage = compute_coverage_summary(
         plan=[{"section_id": "1"}],
         km=km,
-        retrieval_metrics={"search_result_count": 4, "authority_hits": 2, "weak_source_hits": 1},
+        retrieval_metrics={
+            "search_result_count": 4,
+            "authority_hits": 2,
+            "weak_source_hits": 1,
+            "retrieval_recall_wall_seconds": 0.45,
+            "access_backfill_wall_seconds": 0.12,
+            "targeted_backfill_wall_seconds": 0.33,
+            "evidence_acquisition_wall_seconds": 1.2,
+        },
         evidence_slots={},
         fetch_results=[
             {
@@ -236,6 +244,7 @@ def test_compute_coverage_summary_aggregates_blocked_breakdown():
                 "host": "a.example.com",
                 "status": "failed",
                 "error_class": "http_401_403",
+                "elapsed_ms": 110.0,
             },
             {
                 "url": "https://a.example.com/doc",
@@ -244,6 +253,7 @@ def test_compute_coverage_summary_aggregates_blocked_breakdown():
                 "host": "a.example.com",
                 "status": "ok",
                 "error_class": "",
+                "elapsed_ms": 80.0,
             },
             {
                 "url": "https://b.example.com/report.pdf",
@@ -252,6 +262,7 @@ def test_compute_coverage_summary_aggregates_blocked_breakdown():
                 "host": "b.example.com",
                 "status": "ok",
                 "error_class": "",
+                "elapsed_ms": 150.0,
             },
             {
                 "url": "https://c.example.com/app",
@@ -260,11 +271,18 @@ def test_compute_coverage_summary_aggregates_blocked_breakdown():
                 "host": "c.example.com",
                 "status": "ok",
                 "error_class": "",
+                "elapsed_ms": 200.0,
             },
         ],
     )
     assert coverage["blocked_attempt_rate"] == 0.25
     assert coverage["blocked_source_rate"] == 0.0
+    assert coverage["fetch_wall_seconds"] == 0.54
+    assert coverage["blocked_fetch_wall_seconds"] == 0.11
+    assert coverage["retrieval_recall_wall_seconds"] == 0.45
+    assert coverage["access_backfill_wall_seconds"] == 0.12
+    assert coverage["targeted_backfill_wall_seconds"] == 0.33
+    assert coverage["evidence_acquisition_wall_seconds"] == 1.2
     assert coverage["blocked_by_provider"] == {}
     assert coverage["blocked_by_page_type"] == {}
     assert coverage["blocked_by_host"] == {}
@@ -288,6 +306,7 @@ def test_compute_coverage_summary_counts_unsalvaged_host_as_blocked_source():
                 "host": "arxiv.org",
                 "status": "needs_visual",
                 "error_class": "js_only",
+                "elapsed_ms": 100.0,
             },
             {
                 "url": "https://arxiv.org/html/2404.17044v1",
@@ -296,6 +315,7 @@ def test_compute_coverage_summary_counts_unsalvaged_host_as_blocked_source():
                 "host": "arxiv.org",
                 "status": "ok",
                 "error_class": "",
+                "elapsed_ms": 60.0,
             },
             {
                 "url": "https://blocked.example.com/article",
@@ -304,6 +324,7 @@ def test_compute_coverage_summary_counts_unsalvaged_host_as_blocked_source():
                 "host": "blocked.example.com",
                 "status": "failed",
                 "error_class": "http_401_403",
+                "elapsed_ms": 90.0,
             },
         ],
     )
@@ -376,6 +397,9 @@ async def test_fetch_source_candidate_prefers_extract_for_arxiv_host(monkeypatch
     )
     assert calls == ["tavily_extract"]
     assert fetched["status"] == "ok"
+    assert "fetch_wall_seconds" in fetched
+    assert fetched["fetch_wall_seconds"] >= 0.0
+    assert "elapsed_ms" in fetched["attempts"][0]
 
 
 @pytest.mark.asyncio

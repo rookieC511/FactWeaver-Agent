@@ -3,6 +3,7 @@ from __future__ import annotations
 from io import BytesIO
 import logging
 import re
+import time
 from typing import Any, TypedDict
 from urllib.parse import unquote, urlparse
 
@@ -19,6 +20,7 @@ class FetchAttempt(TypedDict, total=False):
     provider: str
     status: str
     content_length: int
+    elapsed_ms: float
     final_url: str
     error_class: str
     http_status: int
@@ -36,6 +38,7 @@ class FetchResult(TypedDict, total=False):
     status: str
     content: str
     content_length: int
+    fetch_wall_seconds: float
     final_url: str
     error_class: str
     http_status: int
@@ -771,6 +774,7 @@ async def fetch_source_candidate(
     credits_est = 0.0
 
     for attempt_order, provider in enumerate(_main_provider_order(page_type, host), start=1):
+        started = time.perf_counter()
         if provider == "pdf_parser":
             attempt, content = await _attempt_pdf_parser(
                 url,
@@ -805,6 +809,7 @@ async def fetch_source_candidate(
                 attempt_order=attempt_order,
                 authority_preserved=authority_preserved,
             )
+        attempt["elapsed_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
         attempts.append(attempt)
         if attempt["status"] == "ok":
             final_attempt = attempt
@@ -812,6 +817,7 @@ async def fetch_source_candidate(
             break
 
     if final_attempt is None and _should_allow_visual(candidate, attempts, allow_visual):
+        started = time.perf_counter()
         attempt, content = await _attempt_visual(
             url,
             goal=goal,
@@ -820,6 +826,7 @@ async def fetch_source_candidate(
             attempt_order=len(attempts) + 1,
             authority_preserved=authority_preserved,
         )
+        attempt["elapsed_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
         attempts.append(attempt)
         if attempt["status"] == "ok":
             final_attempt = attempt
@@ -851,6 +858,7 @@ async def fetch_source_candidate(
         "status": str(final_attempt.get("status") or "failed"),
         "content": final_content if final_attempt.get("status") == "ok" else str(final_attempt.get("content") or ""),
         "content_length": int(len(final_content or "")),
+        "fetch_wall_seconds": round(sum(float(attempt.get("elapsed_ms") or 0.0) for attempt in attempts) / 1000.0, 4),
         "final_url": str(final_attempt.get("final_url") or url),
         "error_class": str(final_attempt.get("error_class") or ""),
         "http_status": int(final_attempt.get("http_status") or 0),

@@ -119,9 +119,19 @@ def compute_coverage_summary(
     if fetch_attempt_rows:
         fetch_attempts = len(fetch_attempt_rows)
         blocked_fetches = sum(1 for item in fetch_attempt_rows if _is_blocked_fetch(item))
+        fetch_wall_seconds = round(
+            sum(float(item.get("elapsed_ms") or 0.0) for item in fetch_attempt_rows) / 1000.0,
+            4,
+        )
+        blocked_fetch_wall_seconds = round(
+            sum(float(item.get("elapsed_ms") or 0.0) for item in fetch_attempt_rows if _is_blocked_fetch(item)) / 1000.0,
+            4,
+        )
     else:
         blocked_fetches = int(retrieval_metrics.get("blocked_fetches", 0))
         fetch_attempts = max(1, int(retrieval_metrics.get("fetch_attempts", 0)))
+        fetch_wall_seconds = round(float(retrieval_metrics.get("fetch_wall_seconds", 0.0) or 0.0), 4)
+        blocked_fetch_wall_seconds = round(float(retrieval_metrics.get("blocked_fetch_wall_seconds", 0.0) or 0.0), 4)
     blocked_by_provider = Counter()
     blocked_by_page_type = Counter()
     blocked_by_host = Counter()
@@ -212,6 +222,12 @@ def compute_coverage_summary(
             4,
         ),
         "direct_answer_support_rate": round(direct_answer_supported / max(1, len(evidence_slots)), 4),
+        "fetch_wall_seconds": fetch_wall_seconds,
+        "blocked_fetch_wall_seconds": blocked_fetch_wall_seconds,
+        "retrieval_recall_wall_seconds": round(float(retrieval_metrics.get("retrieval_recall_wall_seconds", 0.0) or 0.0), 4),
+        "access_backfill_wall_seconds": round(float(retrieval_metrics.get("access_backfill_wall_seconds", 0.0) or 0.0), 4),
+        "targeted_backfill_wall_seconds": round(float(retrieval_metrics.get("targeted_backfill_wall_seconds", 0.0) or 0.0), 4),
+        "evidence_acquisition_wall_seconds": round(float(retrieval_metrics.get("evidence_acquisition_wall_seconds", 0.0) or 0.0), 4),
         "backfill_success_rate": round(backfill_successes / max(1, backfill_attempts), 4) if backfill_attempts else 0.0,
         "same_host_backfill_success_rate": round(
             int(retrieval_metrics.get("same_host_backfill_successes", 0))

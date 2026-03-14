@@ -2,6 +2,7 @@ import asyncio
 from collections import Counter
 import datetime
 import json
+import time
 from urllib.parse import urlparse
 from typing import Any, List, TypedDict
 
@@ -226,6 +227,16 @@ def _merge_metrics(base: dict[str, int], updates: dict[str, int]) -> dict[str, i
     merged = dict(base)
     for key, value in updates.items():
         merged[key] = int(merged.get(key, 0)) + int(value)
+    return merged
+
+
+def _add_duration_metric(
+    metrics: dict[str, float | int],
+    key: str,
+    elapsed_seconds: float,
+) -> dict[str, float | int]:
+    merged = dict(metrics)
+    merged[key] = round(float(merged.get(key, 0.0) or 0.0) + max(0.0, float(elapsed_seconds)), 4)
     return merged
 
 
@@ -502,6 +513,7 @@ async def node_human_feedback(state: ResearchState):
 
 
 async def node_deep_research(state: ResearchState):
+    evidence_acquisition_started = time.perf_counter()
     km = get_current_km()
     task_id = state.get("task_id") or get_current_session_id()
     mode = _research_mode(state)
@@ -584,6 +596,7 @@ Task: {task_desc}
                         "salvaged_by_fallback": bool(fetched.get("salvaged_by_fallback")),
                         "blocked_stage": fetched.get("blocked_stage") or "",
                         "final_url": fetched.get("final_url") or item.get("url") or "",
+                        "elapsed_ms": round(float(fetched.get("fetch_wall_seconds") or 0.0) * 1000.0, 3),
                     }
                 ]
             for attempt in attempts:
@@ -605,6 +618,7 @@ Task: {task_desc}
                         "salvaged_by_fallback": bool(attempt.get("salvaged_by_fallback")),
                         "blocked_stage": attempt.get("blocked_stage") or "",
                         "final_url": attempt.get("final_url") or fetched.get("final_url") or item.get("url") or "",
+                        "elapsed_ms": float(attempt.get("elapsed_ms") or 0.0),
                     }
                 )
             blocked_count = sum(
@@ -618,57 +632,65 @@ Task: {task_desc}
             stage: str,
         ) -> bool:
             nonlocal backfill_attempts_total, retrieval_metrics
-            host = str(item.get("host") or _result_host(str(item.get("url") or ""))).strip().lower()
-            if not host:
-                return False
-            backfill_attempts_total += 1
-            same_host_access_backfill_hosts.add(host)
-            retrieval_metrics = _merge_metrics(retrieval_metrics, {"same_host_backfill_attempts": 1})
-            query = build_access_backfill_query(item, task_desc)
+            started = time.perf_counter()
             try:
-                same_host_results = await search_once(query, 4)
-            except Exception as exc:
-                local_degraded.append(
-                    {
-                        "task": task_desc,
-                        "stage": "access_backfill",
-                        "reason": f"same-host recall failed for {host}: {exc}",
-                    }
-                )
-                return False
-            qualified_same_host = qualify_search_results(same_host_results, task_desc, limit=4)
-            alternatives = rank_access_backfill_candidates(item, qualified_same_host)[:2]
-            if not alternatives:
-                local_degraded.append(
-                    {
-                        "task": task_desc,
-                        "stage": "access_backfill",
-                        "reason": f"no same-host fallback candidate for {host} via query={query}",
-                    }
-                )
-                return False
-            for candidate in alternatives:
-                success = await ingest_candidate(
-                    candidate,
-                    allow_visual=bool(candidate.get("source_tier") == "high_authority"),
-                    stage=f"{stage}_access_backfill",
-                    allow_access_backfill=False,
-                )
-                if success:
-                    local_logs.append(
+                host = str(item.get("host") or _result_host(str(item.get("url") or ""))).strip().lower()
+                if not host:
+                    return False
+                backfill_attempts_total += 1
+                same_host_access_backfill_hosts.add(host)
+                retrieval_metrics = _merge_metrics(retrieval_metrics, {"same_host_backfill_attempts": 1})
+                query = build_access_backfill_query(item, task_desc)
+                try:
+                    same_host_results = await search_once(query, 4)
+                except Exception as exc:
+                    local_degraded.append(
                         {
-                            "role": "access_backfill",
-                            "content": {
-                                "task": task_desc,
-                                "host": host,
-                                "url": candidate.get("url", ""),
-                            },
+                            "task": task_desc,
+                            "stage": "access_backfill",
+                            "reason": f"same-host recall failed for {host}: {exc}",
                         }
                     )
-                    retrieval_metrics = _merge_metrics(retrieval_metrics, {"same_host_backfill_successes": 1})
-                    return True
-            retrieval_metrics = _merge_metrics(retrieval_metrics, {"blocked_after_same_host_backfill": 1})
-            return False
+                    return False
+                qualified_same_host = qualify_search_results(same_host_results, task_desc, limit=4)
+                alternatives = rank_access_backfill_candidates(item, qualified_same_host)[:2]
+                if not alternatives:
+                    local_degraded.append(
+                        {
+                            "task": task_desc,
+                            "stage": "access_backfill",
+                            "reason": f"no same-host fallback candidate for {host} via query={query}",
+                        }
+                    )
+                    return False
+                for candidate in alternatives:
+                    success = await ingest_candidate(
+                        candidate,
+                        allow_visual=bool(candidate.get("source_tier") == "high_authority"),
+                        stage=f"{stage}_access_backfill",
+                        allow_access_backfill=False,
+                    )
+                    if success:
+                        local_logs.append(
+                            {
+                                "role": "access_backfill",
+                                "content": {
+                                    "task": task_desc,
+                                    "host": host,
+                                    "url": candidate.get("url", ""),
+                                },
+                            }
+                        )
+                        retrieval_metrics = _merge_metrics(retrieval_metrics, {"same_host_backfill_successes": 1})
+                        return True
+                retrieval_metrics = _merge_metrics(retrieval_metrics, {"blocked_after_same_host_backfill": 1})
+                return False
+            finally:
+                retrieval_metrics = _add_duration_metric(
+                    retrieval_metrics,
+                    "access_backfill_wall_seconds",
+                    time.perf_counter() - started,
+                )
 
         async def ingest_candidate(
             item: dict[str, Any],
@@ -808,6 +830,7 @@ Task: {task_desc}
 
         scrape_with_fallback = ingest_candidate
 
+        recall_started = time.perf_counter()
         try:
             recall = await staged_candidate_recall(
                 query=search_seed,
@@ -831,6 +854,12 @@ Task: {task_desc}
         except Exception as exc:
             local_missing.append({"task": task_desc, "query": search_seed, "reason": str(exc)})
             return {"logs": local_logs, "missing_sources": local_missing, "degraded_items": local_degraded}
+        finally:
+            retrieval_metrics = _add_duration_metric(
+                retrieval_metrics,
+                "retrieval_recall_wall_seconds",
+                time.perf_counter() - recall_started,
+            )
 
         backfill_attempts_total += int(recall.get("backfill_attempts") or 0)
         all_candidates = list(recall.get("all_candidates") or [])
@@ -1084,183 +1113,193 @@ Task: {task_desc}
 
     async def targeted_backfill(task_item: dict[str, Any]) -> dict[str, Any]:
         nonlocal cost_breakdown, retrieval_metrics, backfill_attempts_total, fetch_results
+        targeted_backfill_started = time.perf_counter()
 
-        logs: list[dict[str, Any]] = []
-        local_missing: list[dict[str, Any]] = []
-        local_degraded: list[dict[str, Any]] = []
-        section_id = task_item.get("section_id", "global")
-        task_desc = task_item.get("task", state["query"])
-        inserted_any = False
-        for query in _build_backfill_queries(task_desc)[:1]:
-            backfill_attempts_total += 1
-            try:
-                search_results, cost_breakdown, retrieval_metrics = await _mode_search(
-                    mode,
-                    query,
-                    max_results=5,
-                    cost_breakdown=cost_breakdown,
-                    retrieval_metrics=retrieval_metrics,
-                )
-            except Exception as exc:
-                local_missing.append({"task": task_desc, "query": query, "reason": f"backfill_search_failed: {exc}"})
-                continue
+        try:
+            logs: list[dict[str, Any]] = []
+            local_missing: list[dict[str, Any]] = []
+            local_degraded: list[dict[str, Any]] = []
+            section_id = task_item.get("section_id", "global")
+            task_desc = task_item.get("task", state["query"])
+            inserted_any = False
+            for query in _build_backfill_queries(task_desc)[:1]:
+                backfill_attempts_total += 1
+                try:
+                    search_results, cost_breakdown, retrieval_metrics = await _mode_search(
+                        mode,
+                        query,
+                        max_results=5,
+                        cost_breakdown=cost_breakdown,
+                        retrieval_metrics=retrieval_metrics,
+                    )
+                except Exception as exc:
+                    local_missing.append({"task": task_desc, "query": query, "reason": f"backfill_search_failed: {exc}"})
+                    continue
 
-            qualified_results = qualify_search_results(search_results, task_desc, limit=5)
-            authority_candidates = [item for item in qualified_results if item.get("source_tier") == "high_authority"]
-            candidate_results = authority_candidates or [item for item in qualified_results if item.get("source_tier") != "weak"]
-            for item in candidate_results[:2]:
-                url = item.get("url", "")
-                host = str(item.get("host") or _result_host(str(url))).strip().lower()
-                if not url or km.is_duplicate(url):
-                    continue
-                if should_force_access_backfill(item, quarantined_pdf_hosts=pdf_host_quarantine):
-                    if await access_backfill(item, stage="targeted_backfill_pdf_access_backfill"):
-                        inserted_any = True
-                        break
-                    local_missing.append(
-                        {
-                            "task": task_desc,
-                            "query": query,
-                            "url": url,
-                            "reason": "pdf_access_backfill_failed",
-                        }
-                    )
-                    continue
-                retrieval_metrics = _merge_metrics(retrieval_metrics, {"fallback_count": 1})
-                fetched = await fetch_source_candidate(
-                    item,
-                    allow_visual=False,
-                    goal=f"Fetch authoritative support for {task_desc}",
-                )
-                if should_quarantine_pdf_host(item, fetched) and host:
-                    pdf_host_quarantine.add(host)
-                attempts = list(fetched.get("attempts") or [])
-                if not attempts:
-                    attempts = [
-                        {
-                            "provider": fetched.get("provider") or "backfill",
-                            "status": fetched.get("status") or "failed",
-                            "page_type": fetched.get("page_type") or "",
-                            "host": fetched.get("host") or item.get("host") or _result_host(str(item.get("url") or "")),
-                            "error_class": fetched.get("error_class") or "",
-                            "http_status": int(fetched.get("http_status") or 0),
-                            "content_type": fetched.get("content_type") or "",
-                            "content_length": int(fetched.get("content_length") or 0),
-                            "authority_preserved": bool(fetched.get("authority_preserved")),
-                            "attempt_order": 1,
-                            "salvaged_by_fallback": bool(fetched.get("salvaged_by_fallback")),
-                            "blocked_stage": fetched.get("blocked_stage") or "",
-                            "final_url": fetched.get("final_url") or item.get("url") or "",
-                        }
-                    ]
-                for attempt in attempts:
-                    fetch_results.append(
-                        {
-                            "task": task_desc,
-                            "url": url,
-                            "provider": attempt.get("provider") or "backfill",
-                            "status": attempt.get("status") or "failed",
-                            "page_type": attempt.get("page_type") or fetched.get("page_type") or "",
-                            "host": attempt.get("host") or item.get("host") or _result_host(str(item.get("url") or "")),
-                            "error_class": attempt.get("error_class") or "",
-                            "http_status": int(attempt.get("http_status") or 0),
-                            "content_type": attempt.get("content_type") or "",
-                            "content_length": int(attempt.get("content_length") or 0),
-                            "authority_preserved": bool(attempt.get("authority_preserved")),
-                            "source_tier": item.get("source_tier", "standard"),
-                            "attempt_order": int(attempt.get("attempt_order") or 0),
-                            "salvaged_by_fallback": bool(attempt.get("salvaged_by_fallback")),
-                            "blocked_stage": attempt.get("blocked_stage") or "",
-                            "final_url": attempt.get("final_url") or fetched.get("final_url") or url,
-                        }
-                    )
-                attempt_count = len(attempts)
-                blocked_count = sum(
-                    1 for attempt in attempts if _is_blocked_fetch_error(str(attempt.get("error_class") or ""))
-                )
-                retrieval_metrics = _merge_metrics(
-                    retrieval_metrics,
-                    {"fetch_attempts": attempt_count, "blocked_fetches": blocked_count},
-                )
-                if fetched.get("credits_est"):
-                    cost_breakdown = record_tavily_credits(cost_breakdown, float(fetched.get("credits_est") or 0.0))
-                    retrieval_metrics = _merge_metrics(retrieval_metrics, {"extract_calls": 1})
-                if fetched.get("status") != "ok":
-                    forced_html_backfill = should_force_non_pdf_access_backfill(
-                        item,
-                        fetched,
-                        attempted_hosts=same_host_access_backfill_hosts,
-                    )
-                    if forced_html_backfill:
-                        if await access_backfill(item, stage="targeted_backfill_html_access_backfill"):
+                qualified_results = qualify_search_results(search_results, task_desc, limit=5)
+                authority_candidates = [item for item in qualified_results if item.get("source_tier") == "high_authority"]
+                candidate_results = authority_candidates or [item for item in qualified_results if item.get("source_tier") != "weak"]
+                for item in candidate_results[:2]:
+                    url = item.get("url", "")
+                    host = str(item.get("host") or _result_host(str(url))).strip().lower()
+                    if not url or km.is_duplicate(url):
+                        continue
+                    if should_force_access_backfill(item, quarantined_pdf_hosts=pdf_host_quarantine):
+                        if await access_backfill(item, stage="targeted_backfill_pdf_access_backfill"):
                             inserted_any = True
                             break
-                    local_missing.append(
-                        {
-                            "task": task_desc,
-                            "query": query,
-                            "url": url,
-                            "reason": fetched.get("error_class") or "backfill_fetch_failed",
-                        }
-                    )
-                    continue
-                compact = _compact_text(str(fetched.get("content") or ""))
-                if not compact or len(compact) <= 120:
-                    local_missing.append(
-                        {
-                            "task": task_desc,
-                            "query": query,
-                            "url": url,
-                            "reason": "backfill_empty_content",
-                        }
-                    )
-                    continue
-                inserted = km.add_compact_document(
-                    compact,
-                    url,
-                    item.get("title", ""),
-                    section_id=section_id,
-                    extra_metadata={
-                        "source_tier": item.get("source_tier", "standard"),
-                        "authority_score": float(item.get("authority_score", 0.0)),
-                        "fetch_provider": fetched.get("provider") or "backfill",
-                        "fetch_status": fetched.get("status") or "ok",
-                    },
-                )
-                if inserted:
-                    inserted_any = True
-                    retrieval_metrics = _merge_metrics(
-                        retrieval_metrics,
-                        {
-                            "successful_authority_fetches": 1
-                            if item.get("source_tier") == "high_authority"
-                            else 0,
-                            "high_value_evidence_count": 1
-                            if float(item.get("authority_score", 0.0)) >= 0.75
-                            else 0,
-                        },
-                    )
-                    logs.append(
-                        {
-                            "role": "targeted_backfill",
-                            "content": {
+                        local_missing.append(
+                            {
                                 "task": task_desc,
                                 "query": query,
                                 "url": url,
+                                "reason": "pdf_access_backfill_failed",
+                            }
+                        )
+                        continue
+                    retrieval_metrics = _merge_metrics(retrieval_metrics, {"fallback_count": 1})
+                    fetched = await fetch_source_candidate(
+                        item,
+                        allow_visual=False,
+                        goal=f"Fetch authoritative support for {task_desc}",
+                    )
+                    if should_quarantine_pdf_host(item, fetched) and host:
+                        pdf_host_quarantine.add(host)
+                    attempts = list(fetched.get("attempts") or [])
+                    if not attempts:
+                        attempts = [
+                            {
+                                "provider": fetched.get("provider") or "backfill",
+                                "status": fetched.get("status") or "failed",
+                                "page_type": fetched.get("page_type") or "",
+                                "host": fetched.get("host") or item.get("host") or _result_host(str(item.get("url") or "")),
+                                "error_class": fetched.get("error_class") or "",
+                                "http_status": int(fetched.get("http_status") or 0),
+                                "content_type": fetched.get("content_type") or "",
+                                "content_length": int(fetched.get("content_length") or 0),
+                                "authority_preserved": bool(fetched.get("authority_preserved")),
+                                "attempt_order": 1,
+                                "salvaged_by_fallback": bool(fetched.get("salvaged_by_fallback")),
+                                "blocked_stage": fetched.get("blocked_stage") or "",
+                                "final_url": fetched.get("final_url") or item.get("url") or "",
+                                "elapsed_ms": round(float(fetched.get("fetch_wall_seconds") or 0.0) * 1000.0, 3),
+                            }
+                        ]
+                    for attempt in attempts:
+                        fetch_results.append(
+                            {
+                                "task": task_desc,
+                                "url": url,
+                                "provider": attempt.get("provider") or "backfill",
+                                "status": attempt.get("status") or "failed",
+                                "page_type": attempt.get("page_type") or fetched.get("page_type") or "",
+                                "host": attempt.get("host") or item.get("host") or _result_host(str(item.get("url") or "")),
+                                "error_class": attempt.get("error_class") or "",
+                                "http_status": int(attempt.get("http_status") or 0),
+                                "content_type": attempt.get("content_type") or "",
+                                "content_length": int(attempt.get("content_length") or 0),
+                                "authority_preserved": bool(attempt.get("authority_preserved")),
                                 "source_tier": item.get("source_tier", "standard"),
+                                "attempt_order": int(attempt.get("attempt_order") or 0),
+                                "salvaged_by_fallback": bool(attempt.get("salvaged_by_fallback")),
+                                "blocked_stage": attempt.get("blocked_stage") or "",
+                                "final_url": attempt.get("final_url") or fetched.get("final_url") or url,
+                                "elapsed_ms": float(attempt.get("elapsed_ms") or 0.0),
+                            }
+                        )
+                    attempt_count = len(attempts)
+                    blocked_count = sum(
+                        1 for attempt in attempts if _is_blocked_fetch_error(str(attempt.get("error_class") or ""))
+                    )
+                    retrieval_metrics = _merge_metrics(
+                        retrieval_metrics,
+                        {"fetch_attempts": attempt_count, "blocked_fetches": blocked_count},
+                    )
+                    if fetched.get("credits_est"):
+                        cost_breakdown = record_tavily_credits(cost_breakdown, float(fetched.get("credits_est") or 0.0))
+                        retrieval_metrics = _merge_metrics(retrieval_metrics, {"extract_calls": 1})
+                    if fetched.get("status") != "ok":
+                        forced_html_backfill = should_force_non_pdf_access_backfill(
+                            item,
+                            fetched,
+                            attempted_hosts=same_host_access_backfill_hosts,
+                        )
+                        if forced_html_backfill:
+                            if await access_backfill(item, stage="targeted_backfill_html_access_backfill"):
+                                inserted_any = True
+                                break
+                        local_missing.append(
+                            {
+                                "task": task_desc,
+                                "query": query,
+                                "url": url,
+                                "reason": fetched.get("error_class") or "backfill_fetch_failed",
+                            }
+                        )
+                        continue
+                    compact = _compact_text(str(fetched.get("content") or ""))
+                    if not compact or len(compact) <= 120:
+                        local_missing.append(
+                            {
+                                "task": task_desc,
+                                "query": query,
+                                "url": url,
+                                "reason": "backfill_empty_content",
+                            }
+                        )
+                        continue
+                    inserted = km.add_compact_document(
+                        compact,
+                        url,
+                        item.get("title", ""),
+                        section_id=section_id,
+                        extra_metadata={
+                            "source_tier": item.get("source_tier", "standard"),
+                            "authority_score": float(item.get("authority_score", 0.0)),
+                            "fetch_provider": fetched.get("provider") or "backfill",
+                            "fetch_status": fetched.get("status") or "ok",
+                        },
+                    )
+                    if inserted:
+                        inserted_any = True
+                        retrieval_metrics = _merge_metrics(
+                            retrieval_metrics,
+                            {
+                                "successful_authority_fetches": 1
+                                if item.get("source_tier") == "high_authority"
+                                else 0,
+                                "high_value_evidence_count": 1
+                                if float(item.get("authority_score", 0.0)) >= 0.75
+                                else 0,
                             },
-                        }
+                        )
+                        logs.append(
+                            {
+                                "role": "targeted_backfill",
+                                "content": {
+                                    "task": task_desc,
+                                    "query": query,
+                                    "url": url,
+                                    "source_tier": item.get("source_tier", "standard"),
+                                },
+                            }
+                        )
+                if inserted_any:
+                    break
+                local_degraded.append(
+                    {
+                        "task": task_desc,
+                        "stage": "targeted_backfill",
+                        "reason": f"no authoritative support added for query={query}",
+                    }
                 )
-            if inserted_any:
-                break
-            local_degraded.append(
-                {
-                    "task": task_desc,
-                    "stage": "targeted_backfill",
-                    "reason": f"no authoritative support added for query={query}",
-                }
+            return {"logs": logs, "missing_sources": local_missing, "degraded_items": local_degraded, "success": inserted_any}
+        finally:
+            retrieval_metrics = _add_duration_metric(
+                retrieval_metrics,
+                "targeted_backfill_wall_seconds",
+                time.perf_counter() - targeted_backfill_started,
             )
-        return {"logs": logs, "missing_sources": local_missing, "degraded_items": local_degraded, "success": inserted_any}
 
     def build_evidence_insufficiency_report(
         coverage_summary: dict[str, float | int],
@@ -1390,6 +1429,11 @@ Task: {task_desc}
             )
             final_report = build_evidence_insufficiency_report(coverage, evidence_slots)
             metrics = state.get("metrics", {"tool_calls": 0, "backtracking": 0})
+            retrieval_metrics = _add_duration_metric(
+                retrieval_metrics,
+                "evidence_acquisition_wall_seconds",
+                time.perf_counter() - evidence_acquisition_started,
+            )
             metrics["tool_calls"] = (
                 metrics.get("tool_calls", 0)
                 + int(retrieval_metrics.get("search_calls", 0))
@@ -1420,6 +1464,11 @@ Task: {task_desc}
             }
 
     metrics = state.get("metrics", {"tool_calls": 0, "backtracking": 0})
+    retrieval_metrics = _add_duration_metric(
+        retrieval_metrics,
+        "evidence_acquisition_wall_seconds",
+        time.perf_counter() - evidence_acquisition_started,
+    )
     metrics["tool_calls"] = (
         metrics.get("tool_calls", 0)
         + int(retrieval_metrics.get("search_calls", 0))
