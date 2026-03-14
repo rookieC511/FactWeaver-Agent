@@ -115,9 +115,19 @@ def compute_coverage_summary(
     if fetch_attempt_rows:
         fetch_attempts = len(fetch_attempt_rows)
         blocked_fetches = sum(1 for item in fetch_attempt_rows if _is_blocked_fetch(item))
+        non_pdf_attempts = sum(
+            1 for item in fetch_attempt_rows if str(item.get("page_type") or "") not in {"pdf", "filing"}
+        )
+        blocked_non_pdf = sum(
+            1
+            for item in fetch_attempt_rows
+            if str(item.get("page_type") or "") not in {"pdf", "filing"} and _is_blocked_fetch(item)
+        )
     else:
         blocked_fetches = int(retrieval_metrics.get("blocked_fetches", 0))
         fetch_attempts = max(1, int(retrieval_metrics.get("fetch_attempts", 0)))
+        non_pdf_attempts = max(1, fetch_attempts)
+        blocked_non_pdf = blocked_fetches
     successful_authority_fetches = int(retrieval_metrics.get("successful_authority_fetches", 0))
     total_sections = max(1, len(section_ids))
     direct_answer_supported = sum(
@@ -165,6 +175,7 @@ def compute_coverage_summary(
     return {
         "authority_source_rate": round(authority_hits / search_result_count, 4),
         "blocked_source_rate": round(blocked_fetches / fetch_attempts, 4),
+        "blocked_non_pdf_rate": round(blocked_non_pdf / max(1, non_pdf_attempts), 4),
         "high_value_evidence_count": high_value_evidence_count,
         "evidence_coverage_rate": round(covered_sections / total_sections, 4),
         "weak_source_hit_rate": round(weak_hits / search_result_count, 4),
@@ -179,6 +190,13 @@ def compute_coverage_summary(
         ),
         "direct_answer_support_rate": round(direct_answer_supported / max(1, len(evidence_slots)), 4),
         "backfill_success_rate": round(backfill_successes / max(1, backfill_attempts), 4) if backfill_attempts else 0.0,
+        "same_host_backfill_success_rate": round(
+            int(retrieval_metrics.get("same_host_backfill_successes", 0))
+            / max(1, int(retrieval_metrics.get("same_host_backfill_attempts", 0)))
+        )
+        if int(retrieval_metrics.get("same_host_backfill_attempts", 0))
+        else 0.0,
+        "blocked_after_same_host_backfill": int(retrieval_metrics.get("blocked_after_same_host_backfill", 0)),
         "blocked_by_provider": dict(blocked_by_provider),
         "blocked_by_page_type": dict(blocked_by_page_type),
         "blocked_by_host": dict(blocked_by_host),

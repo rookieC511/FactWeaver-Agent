@@ -462,8 +462,13 @@ def score_deepresearch_result(
             "comparison_present": bool(draft_audit.get("comparison_present", metrics["comparison_present"])),
             "causal_present": bool(draft_audit.get("causal_present", metrics["causal_present"])),
             "risk_present": bool(draft_audit.get("risk_present", metrics["risk_present"])),
+            "writer_section_retry_count": int(draft_audit.get("writer_section_retry_count", 0)),
+            "writer_transient_error_count": int(draft_audit.get("writer_transient_error_count", 0)),
+            "writer_section_fallback_count": int(draft_audit.get("writer_section_fallback_count", 0)),
+            "writer_section_fallback_used": bool(draft_audit.get("writer_section_fallback_used", False)),
             "authority_source_rate": float((fact_scored.get("coverage_summary") or {}).get("authority_source_rate", 0.0)),
             "blocked_source_rate": float((fact_scored.get("coverage_summary") or {}).get("blocked_source_rate", 0.0)),
+            "blocked_non_pdf_rate": float((fact_scored.get("coverage_summary") or {}).get("blocked_non_pdf_rate", 0.0)),
             "successful_authority_fetch_rate": float(
                 (fact_scored.get("coverage_summary") or {}).get("successful_authority_fetch_rate", 0.0)
             ),
@@ -474,6 +479,12 @@ def score_deepresearch_result(
                 (fact_scored.get("coverage_summary") or {}).get("direct_answer_support_rate", 0.0)
             ),
             "backfill_success_rate": float((fact_scored.get("coverage_summary") or {}).get("backfill_success_rate", 0.0)),
+            "same_host_backfill_success_rate": float(
+                (fact_scored.get("coverage_summary") or {}).get("same_host_backfill_success_rate", 0.0)
+            ),
+            "blocked_after_same_host_backfill": int(
+                (fact_scored.get("coverage_summary") or {}).get("blocked_after_same_host_backfill", 0)
+            ),
             "blocked_by_provider": dict((fact_scored.get("coverage_summary") or {}).get("blocked_by_provider") or {}),
             "blocked_by_page_type": dict((fact_scored.get("coverage_summary") or {}).get("blocked_by_page_type") or {}),
             "blocked_by_host": dict((fact_scored.get("coverage_summary") or {}).get("blocked_by_host") or {}),
@@ -562,12 +573,30 @@ def summarize_deepresearch_results(
         "analysis_signal_count": round(mean([float(item.get("analysis_signal_count") or 0.0) for item in scored_results]), 4)
         if scored_results
         else 0.0,
+        "writer_section_retry_count": round(
+            mean([float(item.get("writer_section_retry_count") or 0.0) for item in scored_results]), 4
+        )
+        if scored_results
+        else 0.0,
+        "writer_transient_error_count": round(
+            mean([float(item.get("writer_transient_error_count") or 0.0) for item in scored_results]), 4
+        )
+        if scored_results
+        else 0.0,
+        "writer_section_fallback_count": round(
+            mean([float(item.get("writer_section_fallback_count") or 0.0) for item in scored_results]), 4
+        )
+        if scored_results
+        else 0.0,
     }
     coverage_averages = {
         "authority_source_rate": round(mean([float(item.get("authority_source_rate") or 0.0) for item in scored_results]), 4)
         if scored_results
         else 0.0,
         "blocked_source_rate": round(mean([float(item.get("blocked_source_rate") or 0.0) for item in scored_results]), 4)
+        if scored_results
+        else 0.0,
+        "blocked_non_pdf_rate": round(mean([float(item.get("blocked_non_pdf_rate") or 0.0) for item in scored_results]), 4)
         if scored_results
         else 0.0,
         "successful_authority_fetch_rate": round(
@@ -592,11 +621,21 @@ def summarize_deepresearch_results(
         "backfill_success_rate": round(mean([float(item.get("backfill_success_rate") or 0.0) for item in scored_results]), 4)
         if scored_results
         else 0.0,
+        "same_host_backfill_success_rate": round(
+            mean([float(item.get("same_host_backfill_success_rate") or 0.0) for item in scored_results]), 4
+        )
+        if scored_results
+        else 0.0,
         "pdf_parser_salvage_rate": round(mean([float(item.get("pdf_parser_salvage_rate") or 0.0) for item in scored_results]), 4)
         if scored_results
         else 0.0,
         "visual_fallback_salvage_rate": round(
             mean([float(item.get("visual_fallback_salvage_rate") or 0.0) for item in scored_results]), 4
+        )
+        if scored_results
+        else 0.0,
+        "blocked_after_same_host_backfill": round(
+            mean([float(item.get("blocked_after_same_host_backfill") or 0.0) for item in scored_results]), 4
         )
         if scored_results
         else 0.0,
@@ -712,18 +751,28 @@ def write_deepresearch_report(payload: dict[str, Any], output_dir: str | Path | 
     for dimension in DIMENSIONS:
         lines.append(f"- `{dimension}`: `{dimension_averages.get(dimension, 0.0)}`")
     lines.extend(["", "## Audit Averages", ""])
-    for key in ("direct_answer_present", "direct_answer_citation_backed", "analysis_signal_count"):
+    for key in (
+        "direct_answer_present",
+        "direct_answer_citation_backed",
+        "analysis_signal_count",
+        "writer_section_retry_count",
+        "writer_transient_error_count",
+        "writer_section_fallback_count",
+    ):
         lines.append(f"- `{key}`: `{audit_averages.get(key, 0.0)}`")
     lines.extend(["", "## Coverage Averages", ""])
     for key in (
         "authority_source_rate",
         "blocked_source_rate",
+        "blocked_non_pdf_rate",
         "successful_authority_fetch_rate",
         "weak_source_hit_rate",
         "high_value_evidence_count",
         "evidence_coverage_rate",
         "direct_answer_support_rate",
         "backfill_success_rate",
+        "same_host_backfill_success_rate",
+        "blocked_after_same_host_backfill",
         "pdf_parser_salvage_rate",
         "visual_fallback_salvage_rate",
     ):
@@ -751,7 +800,9 @@ def write_deepresearch_report(payload: dict[str, Any], output_dir: str | Path | 
                 f"- Direct Answer Present: `{item.get('direct_answer_present')}`",
                 f"- Analysis Signal Count: `{item.get('analysis_signal_count')}`",
                 f"- Blocked Source Rate: `{item.get('blocked_source_rate')}`",
+                f"- Blocked Non-PDF Rate: `{item.get('blocked_non_pdf_rate')}`",
                 f"- Retrieval Failed: `{item.get('retrieval_failed')}`",
+                f"- Writer Section Fallback Count: `{item.get('writer_section_fallback_count')}`",
                 f"- Failure Tags: `{', '.join(item.get('failure_tags', [])) or 'none'}`",
                 f"- Cost (RMB): `{item.get('total_cost_rmb_est')}`",
                 "",

@@ -12,6 +12,7 @@ from .fetch_pipeline import (
     fetch_source_candidate,
     rank_access_backfill_candidates,
     should_force_access_backfill,
+    should_force_non_pdf_access_backfill,
     should_prefer_non_pdf_alternative,
     should_quarantine_pdf_host,
 )
@@ -33,6 +34,7 @@ __all__ = [
     "rank_access_backfill_candidates",
     "staged_candidate_recall",
     "should_force_access_backfill",
+    "should_force_non_pdf_access_backfill",
     "should_prefer_non_pdf_alternative",
     "should_quarantine_pdf_host",
 ]

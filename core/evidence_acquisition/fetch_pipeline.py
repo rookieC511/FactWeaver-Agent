@@ -112,6 +112,13 @@ def build_access_backfill_query(candidate: dict[str, Any], task_desc: str) -> st
         return f'site:{host}/handle "{hint}" -filetype:pdf'
     if host in PDF_OBJECT_STORAGE_HOSTS:
         return f'"{hint}" {task_desc}'
+    if not _looks_like_pdf_candidate(candidate):
+        query_parts = [f"site:{host}"]
+        if hint:
+            query_parts.append(f'"{hint}"')
+        query_parts.append(task_desc)
+        query_parts.append("-filetype:pdf")
+        return " ".join(part for part in query_parts if part)
     return f'site:{host} "{hint}" -filetype:pdf'
 
 
@@ -129,6 +136,7 @@ def rank_access_backfill_candidates(
         return (
             1 if prefer_non_pdf and not bool(item.get("is_pdf")) and not _is_pdf_like_url(url) else 0,
             1 if any(hint in path for hint in LANDING_PATH_HINTS) else 0,
+            1 if not prefer_non_pdf and any(hint in path for hint in HTML_ALT_PATH_HINTS) else 0,
             1 if host in {"hub.hku.hk", "ir.nptu.edu.tw"} and "/handle/" in path else 0,
             float(item.get("fit_score") or 0.0),
         )
@@ -143,6 +151,25 @@ def rank_access_backfill_candidates(
         and (not prefer_non_pdf or (not bool(candidate.get("is_pdf")) and not _is_pdf_like_url(str(candidate.get("url") or ""))))
     ]
     return sorted(filtered, key=sort_key, reverse=True)
+
+
+def should_force_non_pdf_access_backfill(
+    candidate: dict[str, Any],
+    fetched: FetchResult,
+    *,
+    attempted_hosts: set[str] | None = None,
+) -> bool:
+    if _looks_like_pdf_candidate(candidate):
+        return False
+    if str(candidate.get("source_tier") or "") != "high_authority":
+        return False
+    host = str(candidate.get("host") or _host(str(candidate.get("url") or ""))).lower()
+    if host in (attempted_hosts or set()):
+        return False
+    if host not in NON_PDF_FORCE_ACCESS_BACKFILL_HOSTS:
+        return False
+    attempts = list(fetched.get("attempts") or [])
+    return any(str(attempt.get("error_class") or "") in BLOCKED_ERROR_CLASSES for attempt in attempts)
 
 
 MAIN_HEADERS = {
@@ -197,6 +224,26 @@ LANDING_PATH_HINTS = (
     "/repository",
     "/metadata",
 )
+HTML_ALT_PATH_HINTS = (
+    "/insight",
+    "/insights",
+    "/article",
+    "/articles",
+    "/news",
+    "/update",
+    "/updates",
+    "/publication",
+    "/publications",
+    "/practice",
+    "/practice-area",
+    "/practice-areas",
+    "/resource",
+    "/resources",
+    "/blog",
+)
+NON_PDF_FORCE_ACCESS_BACKFILL_HOSTS = {
+    "www.wshblaw.com",
+}
 
 
 def _host(url: str) -> str:

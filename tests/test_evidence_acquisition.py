@@ -10,6 +10,7 @@ from core.evidence_acquisition.fetch_pipeline import (
     fetch_source_candidate,
     rank_access_backfill_candidates,
     should_force_access_backfill,
+    should_force_non_pdf_access_backfill,
 )
 from core.evidence_acquisition.qualification import (
     admit_source_candidates,
@@ -144,6 +145,26 @@ def test_rank_access_backfill_candidates_prefers_non_pdf_landing_pages():
     assert ranked
     assert ranked[0]["url"] == "https://hub.hku.hk/handle/10722/50521"
     assert all(not item.get("is_pdf") for item in ranked)
+
+
+def test_non_pdf_blocked_host_triggers_same_host_backfill():
+    candidate = {
+        "url": "https://www.wshblaw.com/adas-liability-overview",
+        "host": "www.wshblaw.com",
+        "title": "ADAS liability overview",
+        "is_pdf": False,
+        "source_tier": "high_authority",
+    }
+    fetched = {
+        "attempts": [
+            {"provider": "jina", "error_class": "http_401_403"},
+            {"provider": "direct_http", "error_class": "js_only"},
+        ]
+    }
+    assert should_force_non_pdf_access_backfill(candidate, fetched, attempted_hosts=set()) is True
+    query = build_access_backfill_query(candidate, "ADAS liability allocation and case law")
+    assert query.startswith('site:www.wshblaw.com')
+    assert "-filetype:pdf" in query
 
 
 @pytest.mark.asyncio

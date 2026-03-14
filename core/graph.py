@@ -20,6 +20,7 @@ from core.evidence_acquisition import (
     rank_access_backfill_candidates,
     staged_candidate_recall,
     should_force_access_backfill,
+    should_force_non_pdf_access_backfill,
     should_prefer_non_pdf_alternative,
     should_quarantine_pdf_host,
 )
@@ -600,6 +601,7 @@ async def node_deep_research(state: ResearchState):
     fetch_results = list(state.get("fetch_results") or [])
     backfill_attempts_total = int(state.get("backfill_attempts") or 0)
     pdf_host_quarantine: set[str] = set()
+    same_host_access_backfill_hosts: set[str] = set()
     strict_evidence_gate = _needs_strict_evidence_gate(task_id)
 
     async def process_task(task_item: dict[str, Any]) -> dict[str, Any]:
@@ -701,11 +703,13 @@ Task: {task_desc}
             *,
             stage: str,
         ) -> bool:
-            nonlocal backfill_attempts_total
+            nonlocal backfill_attempts_total, retrieval_metrics
             host = str(item.get("host") or _result_host(str(item.get("url") or ""))).strip().lower()
             if not host:
                 return False
             backfill_attempts_total += 1
+            same_host_access_backfill_hosts.add(host)
+            retrieval_metrics = _merge_metrics(retrieval_metrics, {"same_host_backfill_attempts": 1})
             query = build_access_backfill_query(item, task_desc)
             try:
                 same_host_results = await search_once(query, 4)
@@ -747,7 +751,9 @@ Task: {task_desc}
                             },
                         }
                     )
+                    retrieval_metrics = _merge_metrics(retrieval_metrics, {"same_host_backfill_successes": 1})
                     return True
+            retrieval_metrics = _merge_metrics(retrieval_metrics, {"blocked_after_same_host_backfill": 1})
             return False
 
         async def ingest_candidate(
@@ -798,7 +804,23 @@ Task: {task_desc}
                 cost_breakdown = record_tavily_credits(cost_breakdown, float(fetched.get("credits_est") or 0.0))
                 retrieval_metrics = _merge_metrics(retrieval_metrics, {"extract_calls": 1})
             if fetched.get("status") != "ok":
-                if allow_access_backfill and item.get("source_tier") == "high_authority":
+                forced_html_backfill = allow_access_backfill and should_force_non_pdf_access_backfill(
+                    item,
+                    fetched,
+                    attempted_hosts=same_host_access_backfill_hosts,
+                )
+                generic_backfill_allowed = not (
+                    host in same_host_access_backfill_hosts and not (str(url).lower().endswith(".pdf") or bool(item.get("is_pdf")))
+                )
+                if forced_html_backfill:
+                    if await access_backfill(item, stage=f"{stage}_html_access_backfill"):
+                        return True
+                if (
+                    allow_access_backfill
+                    and not forced_html_backfill
+                    and generic_backfill_allowed
+                    and item.get("source_tier") == "high_authority"
+                ):
                     if await access_backfill(item, stage=stage):
                         return True
                 local_missing.append(
@@ -1674,6 +1696,15 @@ Task: {task_desc}
                     cost_breakdown = record_tavily_credits(cost_breakdown, float(fetched.get("credits_est") or 0.0))
                     retrieval_metrics = _merge_metrics(retrieval_metrics, {"extract_calls": 1})
                 if fetched.get("status") != "ok":
+                    forced_html_backfill = should_force_non_pdf_access_backfill(
+                        item,
+                        fetched,
+                        attempted_hosts=same_host_access_backfill_hosts,
+                    )
+                    if forced_html_backfill:
+                        if await access_backfill(item, stage="targeted_backfill_html_access_backfill"):
+                            inserted_any = True
+                            break
                     local_missing.append(
                         {
                             "task": task_desc,

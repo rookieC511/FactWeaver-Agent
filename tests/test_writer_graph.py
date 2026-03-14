@@ -1,4 +1,10 @@
-from core.writer_graph import audit_final_doc
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+from core.memory import activate_session, cleanup_session_km, get_current_km, reset_active_session
+from core.writer_graph import audit_final_doc, section_writer_node
 
 
 def test_audit_final_doc_flags_missing_direct_answer_and_weak_analysis():
@@ -93,3 +99,53 @@ The main risk is demand volatility.
     assert audit["causal_present"] is True
     assert audit["risk_present"] is True
     assert audit["analysis_signal_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_section_writer_retries_transient_error_and_uses_structured_fallback(monkeypatch):
+    import core.writer_graph as writer_graph
+
+    token = activate_session("writer-retry")
+    km = get_current_km()
+    km.clear()
+    km.add_compact_document(
+        "ADAS liability evidence from a cited source " * 10,
+        "https://example.com/evidence",
+        "ADAS evidence",
+        section_id="1",
+        extra_metadata={"source_tier": "high_authority", "authority_score": 0.95},
+    )
+
+    call_count = {"n": 0}
+
+    async def flaky_invoke(messages):
+        call_count["n"] += 1
+        raise RuntimeError("Connection error")
+
+    monkeypatch.setattr(writer_graph, "llm_worker", SimpleNamespace(ainvoke=flaky_invoke))
+
+    try:
+        result = await section_writer_node(
+            {
+                "id": "1",
+                "title": "Liability",
+                "description": "Explain liability allocation.",
+                "direct_question": "Who is liable in ADAS accidents?",
+                "must_answer_points": [{"id": "1", "section_id": "1", "question": "Who is liable?"}],
+                "required_analysis_modes": ["causal", "risk"],
+                "writer_context_mode": "section_scoped",
+            }
+        )
+        content = result["sections"]["1"]
+        runtime = result["writer_runtime"]["1"]
+        assert call_count["n"] == 2
+        assert "Section writing failed:" not in content
+        assert "Direct Answer:" in content
+        assert "Key Evidence:" in content
+        assert "Analysis:" in content
+        assert runtime["retry_count"] == 1
+        assert runtime["fallback_used"] is True
+        assert runtime["transient_error_count"] >= 1
+    finally:
+        cleanup_session_km("writer-retry")
+        reset_active_session(token)

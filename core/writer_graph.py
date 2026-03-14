@@ -1,3 +1,4 @@
+import asyncio
 import json
 import operator
 import os
@@ -67,6 +68,7 @@ class WriterState(TypedDict):
     query: str
     outline: List[Section]
     sections: Annotated[Dict[str, str], operator.ior]
+    writer_runtime: Annotated[Dict[str, dict[str, Any]], operator.ior]
     final_doc: str
     iteration: int
     user_feedback: str
@@ -130,6 +132,79 @@ def _analysis_flags(text: str) -> dict[str, bool]:
     for name, patterns in ANALYSIS_SIGNAL_MAP.items():
         flags[name] = any(pattern in lowered for pattern in patterns)
     return flags
+
+
+def _is_transient_writer_error(exc: Exception) -> bool:
+    lowered = str(exc or "").lower()
+    transient_tokens = (
+        "connection error",
+        "connection reset",
+        "timed out",
+        "timeout",
+        "temporarily unavailable",
+        "service unavailable",
+        "502",
+        "503",
+        "504",
+        "gateway",
+        "network",
+        "read timeout",
+    )
+    return any(token in lowered for token in transient_tokens)
+
+
+def _compact_doc_excerpt(doc: Any, limit: int = 180) -> str:
+    text = re.sub(r"\s+", " ", str(doc.page_content or "")).strip()
+    if len(text) > limit:
+        text = text[:limit].rstrip() + "..."
+    citation_hash = str(doc.metadata.get("citation_hash") or "unknown")
+    url = str(doc.metadata.get("url") or doc.metadata.get("source_url") or "")
+    return f"- [HASH:{citation_hash} | URL:{url}] {text}"
+
+
+def _fallback_section_from_docs(
+    *,
+    docs: list[Any],
+    must_answer_points: list[dict[str, Any]],
+    required_modes: list[str],
+) -> str:
+    evidence_lines = [_compact_doc_excerpt(doc) for doc in docs[:3] if str(doc.page_content or "").strip()]
+    if not evidence_lines:
+        evidence_lines = ["- No reliable section-specific evidence was available during fallback synthesis."]
+    point_summary = "; ".join(
+        _clause_text(point) for point in must_answer_points[:3] if _clause_text(point)
+    ) or "the section question"
+    analysis_sentences: list[str] = []
+    if "comparison" in required_modes:
+        analysis_sentences.append(
+            "Comparison: the retrieved evidence is too fragmented to support a strong side-by-side conclusion."
+        )
+    if "causal" in required_modes:
+        analysis_sentences.append(
+            "Causal analysis: available sources indicate partial drivers, but the chain of evidence is incomplete."
+        )
+    if "risk" in required_modes:
+        analysis_sentences.append(
+            "Risk and limitations: conclusions should be treated as provisional until stronger sources are recovered."
+        )
+    if not analysis_sentences:
+        analysis_sentences.append(
+            "Analysis: the section fallback is grounded only in currently retrieved evidence and should be read as provisional."
+        )
+    return "\n".join(
+        [
+            f"Direct Answer: Based on the currently retrieved evidence, this section can only provide a bounded answer about {point_summary}.",
+            "",
+            "Key Evidence:",
+            *evidence_lines,
+            "",
+            "Analysis:",
+            *[f"- {sentence}" for sentence in analysis_sentences],
+            "",
+            "Uncertainty:",
+            "- This section used an evidence-only fallback after a transient writer failure; no new facts were introduced.",
+        ]
+    )
 
 
 def audit_final_doc(final_doc: str, query: str, task_contract: dict[str, Any] | None, evidence_slots: dict[str, Any] | None) -> dict[str, Any]:
@@ -369,12 +444,48 @@ Requirements:
 - Every important claim must keep the citation hashes or source links from the evidence.
 - If the evidence is weak or missing, say that explicitly instead of guessing.
 """
-    try:
-        resp = await llm_worker.ainvoke([HumanMessage(content=prompt)])
-        content = resp.content
-    except Exception as exc:
-        content = f"Section writing failed: {exc}"
-    return {"sections": {section_id: content}}
+    retry_count = 0
+    transient_error_count = 0
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        try:
+            resp = await llm_worker.ainvoke([HumanMessage(content=prompt)])
+            content = resp.content
+            return {
+                "sections": {section_id: content},
+                "writer_runtime": {
+                    section_id: {
+                        "retry_count": retry_count,
+                        "transient_error_count": transient_error_count,
+                        "fallback_used": False,
+                    }
+                },
+            }
+        except Exception as exc:
+            last_exc = exc
+            if _is_transient_writer_error(exc):
+                transient_error_count += 1
+                if attempt == 0:
+                    retry_count += 1
+                    await asyncio.sleep(0.75)
+                    continue
+            break
+    content = _fallback_section_from_docs(
+        docs=docs,
+        must_answer_points=must_answer_points,
+        required_modes=required_modes,
+    )
+    return {
+        "sections": {section_id: content},
+        "writer_runtime": {
+            section_id: {
+                "retry_count": retry_count,
+                "transient_error_count": transient_error_count,
+                "fallback_used": True,
+                "last_error": str(last_exc or ""),
+            }
+        },
+    }
 
 
 async def editor_node(state: WriterState):
@@ -434,6 +545,17 @@ def draft_audit_node(state: WriterState):
         state.get("task_contract") or {},
         state.get("evidence_slots") or {},
     )
+    writer_runtime = dict(state.get("writer_runtime") or {})
+    audit["writer_section_retry_count"] = sum(
+        int(section_state.get("retry_count") or 0) for section_state in writer_runtime.values()
+    )
+    audit["writer_transient_error_count"] = sum(
+        int(section_state.get("transient_error_count") or 0) for section_state in writer_runtime.values()
+    )
+    audit["writer_section_fallback_count"] = sum(
+        1 for section_state in writer_runtime.values() if section_state.get("fallback_used")
+    )
+    audit["writer_section_fallback_used"] = audit["writer_section_fallback_count"] > 0
     return {"draft_audit": audit}
 
 
