@@ -11,6 +11,8 @@ SERPER_API_KEY = os.getenv("SERPER_API_KEY", "")
 SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "serper").strip().lower()
 SEARCH_FALLBACK_PROVIDER = os.getenv("SEARCH_FALLBACK_PROVIDER", "").strip().lower()
 DEFAULT_RESEARCH_MODE = os.getenv("DEFAULT_RESEARCH_MODE", "medium").strip().lower()
+DEFAULT_ARCHITECTURE_MODE = os.getenv("FACTWEAVER_ARCHITECTURE_MODE", "supervisor_team").strip().lower()
+RUNTIME_ARTIFACT_DIR = os.getenv("FACTWEAVER_ARTIFACT_DIR", "artifacts").strip()
 
 # Public pricing snapshots used for benchmark estimation only
 SERPER_USD_PER_QUERY = float(os.getenv("SERPER_USD_PER_QUERY", "0.001"))

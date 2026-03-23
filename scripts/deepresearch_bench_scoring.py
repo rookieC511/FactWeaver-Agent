@@ -100,6 +100,17 @@ def _coverage_value(coverage_summary: dict[str, Any], key: str) -> float | int |
         return None
 
 
+def _is_strict_success(item: dict[str, Any]) -> bool:
+    return str(item.get("status") or "") == "SUCCESS" and str(item.get("current_phase") or "").upper() == "DONE"
+
+
+def _is_degraded_completion(item: dict[str, Any]) -> bool:
+    writer_team_result = dict(item.get("writer_team_result") or {})
+    output_mode = str(writer_team_result.get("output_mode") or "").lower()
+    has_output = bool(str(item.get("report") or "").strip()) or bool(writer_team_result.get("draft_ref"))
+    return output_mode == "degraded" and has_output and not _is_strict_success(item)
+
+
 def _extract_dimension_scores_from_payload(parsed: dict[str, Any]) -> dict[str, float] | None:
     source = parsed
     if not all(dimension in source for dimension in DIMENSIONS) and isinstance(parsed.get("scores"), dict):
@@ -463,6 +474,7 @@ def score_deepresearch_result(
     metrics = compute_report_metrics(_report_text(fact_scored))
     draft_audit = dict(fact_scored.get("draft_audit") or {})
     task_contract = dict(fact_scored.get("task_contract") or {})
+    progress_ledger = dict(fact_scored.get("progress_ledger") or {})
     if draft_audit:
         task_clause_coverage_rate = float(draft_audit.get("task_clause_coverage_rate", 0.0))
     else:
@@ -502,6 +514,10 @@ def score_deepresearch_result(
             "writer_transient_error_count": int(draft_audit.get("writer_transient_error_count", 0)),
             "writer_section_fallback_count": int(draft_audit.get("writer_section_fallback_count", 0)),
             "writer_section_fallback_used": bool(draft_audit.get("writer_section_fallback_used", False)),
+            "architecture_mode": str(fact_scored.get("architecture_mode") or "supervisor_team"),
+            "team_stall_count": int(progress_ledger.get("team_stall_count") or 0),
+            "global_stall_count": int(progress_ledger.get("global_stall_count") or 0),
+            "last_team_called": str(progress_ledger.get("last_team_called") or ""),
             "blocked_by_provider": dict((fact_scored.get("coverage_summary") or {}).get("blocked_by_provider") or {}),
             "blocked_by_page_type": dict((fact_scored.get("coverage_summary") or {}).get("blocked_by_page_type") or {}),
             "blocked_by_host": dict((fact_scored.get("coverage_summary") or {}).get("blocked_by_host") or {}),
@@ -511,6 +527,8 @@ def score_deepresearch_result(
             },
         }
     )
+    fact_scored["strict_success"] = _is_strict_success(fact_scored)
+    fact_scored["degraded_completion"] = _is_degraded_completion(fact_scored)
     return fact_scored
 
 
@@ -562,9 +580,12 @@ def summarize_deepresearch_results(
     ]
     payload = dict(payload)
     payload["results"] = scored_results
-    success_statuses = {"SUCCESS"}
     success_rate = round(
-        sum(1 for item in scored_results if str(item.get("status")) in success_statuses) / max(1, len(scored_results)),
+        sum(1 for item in scored_results if bool(item.get("strict_success", _is_strict_success(item)))) / max(1, len(scored_results)),
+        4,
+    )
+    degraded_completion_rate = round(
+        sum(1 for item in scored_results if bool(item.get("degraded_completion", _is_degraded_completion(item)))) / max(1, len(scored_results)),
         4,
     )
     averages = {
@@ -617,6 +638,12 @@ def summarize_deepresearch_results(
         )
         if scored_results
         else 0.0,
+        "team_stall_count": round(mean([float(item.get("team_stall_count") or 0.0) for item in scored_results]), 4)
+        if scored_results
+        else 0.0,
+        "global_stall_count": round(mean([float(item.get("global_stall_count") or 0.0) for item in scored_results]), 4)
+        if scored_results
+        else 0.0,
     }
     coverage_metric_stats = {
         metric: _mean_present(metric)
@@ -658,6 +685,7 @@ def summarize_deepresearch_results(
     payload["summary"] = {
         "sample_size": len(scored_results),
         "success_rate": success_rate,
+        "degraded_completion_rate": degraded_completion_rate,
         "avg_drb_report_score": averages["drb_report_score"],
         "avg_fact_score": averages["fact_score"],
         "avg_llm_cost_rmb": averages["llm_cost_rmb"],
@@ -673,6 +701,7 @@ def summarize_deepresearch_results(
         "weakest_dimension": weakest_dimension,
         "language_distribution": Counter(_normalize_language(str(item.get("language"))) for item in scored_results),
         "topic_distribution": Counter(str(item.get("topic") or "unknown") for item in scored_results),
+        "architecture_distribution": Counter(str(item.get("architecture_mode") or "unknown") for item in scored_results),
         "failure_tag_counts": dict(failure_counts),
         "blocked_by_provider": dict(blocked_by_provider),
         "blocked_by_page_type": dict(blocked_by_page_type),
@@ -722,6 +751,7 @@ def write_deepresearch_report(payload: dict[str, Any], output_dir: str | Path | 
     blocked_by_provider = summary.get("blocked_by_provider") or {}
     blocked_by_page_type = summary.get("blocked_by_page_type") or {}
     blocked_by_host = summary.get("blocked_by_host") or {}
+    architecture_distribution = summary.get("architecture_distribution") or {}
     lines = [
         f"# DeepResearch Bench Local Report: {run_id}",
         "",
@@ -731,12 +761,14 @@ def write_deepresearch_report(payload: dict[str, Any], output_dir: str | Path | 
         f"- Scoring Reliability: `{payload.get('scoring_reliability', '')}`",
         f"- Sample Size: `{summary.get('sample_size', 0)}`",
         f"- Success Rate: `{summary.get('success_rate', 0.0)}`",
+        f"- Degraded Completion Rate: `{summary.get('degraded_completion_rate', 0.0)}`",
         f"- Avg DRB Report Score: `{summary.get('avg_drb_report_score', 0.0)}`",
         f"- Avg FACT Score: `{summary.get('avg_fact_score', 0.0)}`",
         f"- Avg Total Cost (RMB): `{summary.get('avg_total_cost_rmb_est', 0.0)}`",
         f"- Avg Elapsed (s): `{summary.get('avg_elapsed_seconds', 0.0)}`",
         f"- Avg Task Clause Coverage Rate: `{summary.get('avg_task_clause_coverage_rate', 0.0)}`",
         f"- Weakest Dimension: `{summary.get('weakest_dimension', '')}`",
+        f"- Architecture Distribution: `{architecture_distribution}`",
         f"- Coverage Metric Sample Size: `{summary.get('coverage_metric_sample_size', 0)}`",
         f"- Coverage Metric Missing Count: `{summary.get('coverage_metric_missing_count', 0)}`",
         f"- Gate Passed: `{summary.get('gate', {}).get('passed', False)}`",
@@ -751,6 +783,8 @@ def write_deepresearch_report(payload: dict[str, Any], output_dir: str | Path | 
         "direct_answer_present",
         "direct_answer_citation_backed",
         "analysis_signal_count",
+        "team_stall_count",
+        "global_stall_count",
         "writer_section_retry_count",
         "writer_transient_error_count",
         "writer_section_fallback_count",
@@ -791,6 +825,9 @@ def write_deepresearch_report(payload: dict[str, Any], output_dir: str | Path | 
                 f"### {item.get('id')} | {item.get('language')} | {item.get('topic')}",
                 "",
                 f"- Status: `{item.get('status')}`",
+                f"- Strict Success: `{item.get('strict_success')}`",
+                f"- Degraded Completion: `{item.get('degraded_completion')}`",
+                f"- Current Phase: `{item.get('current_phase')}`",
                 f"- DRB Report Score: `{item.get('drb_report_score')}`",
                 f"- FACT Score: `{item.get('fact_score')}`",
                 f"- Task Clause Coverage: `{item.get('task_clause_coverage_rate')}`",

@@ -3,7 +3,7 @@ import os
 import time
 from typing import Any
 
-from core.config import DEFAULT_RESEARCH_MODE, MAX_TASK_DURATION_SECONDS, MAX_TASK_NODE_COUNT, MAX_TASK_RMB_COST
+from core.config import DEFAULT_ARCHITECTURE_MODE, DEFAULT_RESEARCH_MODE, MAX_TASK_DURATION_SECONDS, MAX_TASK_NODE_COUNT, MAX_TASK_RMB_COST
 from core.costs import enrich_cost_fields
 from core.memory import (
     activate_session,
@@ -13,6 +13,7 @@ from core.memory import (
     restore_session_km,
 )
 from core.runtime_control import configured_interrupt_point, crash_process, should_interrupt_task
+from core.multi_agent_runtime import normalize_architecture_mode
 from gateway.state_store import (
     cache_report,
     get_latest_knowledge_snapshot,
@@ -24,14 +25,20 @@ from gateway.state_store import (
 
 def _status_detail_for_node(node_name: str, current_cost: float, resume: bool = False) -> str:
     prefix = "恢复中，" if resume else ""
+    if node_name == "supervisor":
+        return f"{prefix}Supervisor 正在判断下一步路由..."
     if node_name == "planner":
         return f"{prefix}正在生成研究大纲与检索计划..."
     if node_name == "human_review":
         return f"{prefix}大纲已确认，准备执行检索..."
     if node_name == "executor":
         return f"{prefix}深度检索执行中，当前模型成本约 RMB {current_cost:.4f}"
+    if node_name == "research_team":
+        return f"{prefix}Research Team 正在执行 clause-level research..."
     if node_name == "writer":
         return f"{prefix}正在汇总资料并生成最终报告..."
+    if node_name == "writer_team":
+        return f"{prefix}Writer Team 正在组织报告与验证结论..."
     return f"{prefix}节点执行中: {node_name}"
 
 
@@ -46,16 +53,26 @@ def _coerce_costs(cost_breakdown: dict[str, Any] | None) -> dict[str, float | in
     }
 
 
-def _graph_input(task_id: str, query: str, research_mode: str) -> dict[str, Any]:
+def _graph_input(task_id: str, query: str, research_mode: str, architecture_mode: str) -> dict[str, Any]:
     return {
         "query": query,
         "task_id": task_id,
+        "architecture_mode": architecture_mode,
         "iteration": 1,
         "plan": [],
         "outline": [],
         "task_contract": {},
+        "task_ledger": {},
+        "progress_ledger": {},
         "evidence_slots": {},
         "draft_audit": {},
+        "research_team_result": {},
+        "writer_team_result": {},
+        "team_route_trace": [],
+        "current_phase": "PLAN",
+        "supervisor_next_node": "",
+        "bundle_ref": "",
+        "draft_ref": "",
         "user_feedback": "",
         "final_report": "",
         "metrics": {"tool_calls": 0, "backtracking": 0},
@@ -75,13 +92,26 @@ def _graph_input(task_id: str, query: str, research_mode: str) -> dict[str, Any]
     }
 
 
-def _graph_config(task_id: str) -> dict[str, Any]:
-    return {"configurable": {"thread_id": task_id}}
+def _graph_config(task_id: str, architecture_mode: str) -> dict[str, Any]:
+    return {"configurable": {"thread_id": task_id, "checkpoint_ns": architecture_mode}}
 
 
-def _checkpoint_meta(langgraph_app: Any, task_id: str) -> tuple[str | None, str | None, tuple[Any, ...]]:
+def _max_node_budget_for_architecture(architecture_mode: str) -> int:
+    mode = normalize_architecture_mode(architecture_mode)
+    if mode == "supervisor_team":
+        # Supervisor routing adds orchestration hops on top of the legacy research/write path.
+        return max(MAX_TASK_NODE_COUNT, 24)
+    return MAX_TASK_NODE_COUNT
+
+
+def _is_terminal_node_state(node_state: dict[str, Any]) -> bool:
+    phase = str(node_state.get("current_phase") or "").upper()
+    return phase in {"DONE", "FAIL_HARD"}
+
+
+def _checkpoint_meta(langgraph_app: Any, task_id: str, architecture_mode: str) -> tuple[str | None, str | None, tuple[Any, ...]]:
     try:
-        state = langgraph_app.get_state(_graph_config(task_id))
+        state = langgraph_app.get_state(_graph_config(task_id, architecture_mode))
         configurable = dict(state.config.get("configurable", {}))
         checkpoint_id = configurable.get("checkpoint_id")
         checkpoint_ns = configurable.get("checkpoint_ns")
@@ -109,11 +139,12 @@ def _persist_runtime_snapshot(
     completed_at: int | None,
     checkpoint_node: str | None,
     interruption_state: str | None,
+    architecture_mode: str,
     last_error: str | None = None,
     report: str | None = None,
 ) -> tuple[str | None, str | None, int]:
     external_costs = _coerce_costs(merged_state.get("cost_breakdown"))
-    checkpoint_id, checkpoint_ns, _ = _checkpoint_meta(langgraph_app, task_id)
+    checkpoint_id, checkpoint_ns, _ = _checkpoint_meta(langgraph_app, task_id, architecture_mode)
     snapshot_id = save_knowledge_snapshot(
         task_id,
         thread_id=task_id,
@@ -149,6 +180,7 @@ def _persist_runtime_snapshot(
         last_checkpoint_node=checkpoint_node,
         interruption_state=interruption_state,
         last_km_snapshot_id=snapshot_id,
+        architecture_mode=architecture_mode,
     )
     return checkpoint_id, checkpoint_ns, snapshot_id
 
@@ -159,16 +191,21 @@ async def run_research_job(
     *,
     backend: str,
     research_mode: str,
+    architecture_mode: str | None = None,
     disable_cache: bool = False,
     resume_from_checkpoint: bool = False,
 ) -> dict[str, Any]:
     os.environ["FACTWEAVER_API_MODE"] = "1"
 
-    from core.graph import app as langgraph_app
+    from core.graph import app as supervisor_team_app
+    from core.graph import legacy_app
     from core.models import global_cost_tracker
 
     existing_task = get_task(task_id) or {}
     research_mode = (research_mode or existing_task.get("research_mode") or DEFAULT_RESEARCH_MODE).strip().lower()
+    architecture_mode = normalize_architecture_mode(
+        architecture_mode or existing_task.get("architecture_mode") or DEFAULT_ARCHITECTURE_MODE
+    )
     query = query or existing_task.get("query") or ""
     if not query:
         raise ValueError("query is required to run or resume a research job")
@@ -184,7 +221,9 @@ async def run_research_job(
     token = activate_session(task_id)
     segment_start = time.time()
     node_count = 0
+    max_node_budget = _max_node_budget_for_architecture(architecture_mode)
     merged_state: dict[str, Any] = {}
+    langgraph_app = legacy_app if architecture_mode == "legacy_workflow" else supervisor_team_app
 
     try:
         if resume_from_checkpoint:
@@ -211,16 +250,17 @@ async def run_research_job(
             resumed_from_checkpoint=resume_from_checkpoint,
             started_at=started_at,
             interruption_state="resuming" if resume_from_checkpoint else "running",
+            architecture_mode=architecture_mode,
         )
 
         interrupt_point = configured_interrupt_point()
         top_level_interrupts = None
-        if should_interrupt_task(task_id, interrupt_point) and interrupt_point in {"planner", "executor"}:
+        if should_interrupt_task(task_id, interrupt_point) and interrupt_point in {"planner", "executor", "research_team", "writer_team"}:
             top_level_interrupts = [interrupt_point]
 
         async for event in langgraph_app.astream(
-            None if resume_from_checkpoint else _graph_input(task_id, query, research_mode),
-            config=_graph_config(task_id),
+            None if resume_from_checkpoint else _graph_input(task_id, query, research_mode, architecture_mode),
+            config=_graph_config(task_id, architecture_mode),
             interrupt_after=top_level_interrupts,
         ):
             if "__interrupt__" in event:
@@ -244,6 +284,7 @@ async def run_research_job(
                     completed_at=None,
                     checkpoint_node=interrupt_point,
                     interruption_state=interrupt_point,
+                    architecture_mode=architecture_mode,
                 )
                 crash_process()
 
@@ -253,13 +294,13 @@ async def run_research_job(
                 current_cost = global_cost_tracker.total_cost_rmb
                 merged_state.update(node_state)
 
-                if elapsed > MAX_TASK_DURATION_SECONDS:
+                if elapsed > MAX_TASK_DURATION_SECONDS and not _is_terminal_node_state(node_state):
                     raise RuntimeError(
                         f"Task timed out after {elapsed:.0f}s (limit {MAX_TASK_DURATION_SECONDS}s)"
                     )
-                if node_count > MAX_TASK_NODE_COUNT:
+                if node_count > max_node_budget:
                     raise RuntimeError(
-                        f"Task exceeded node budget: {node_count} > {MAX_TASK_NODE_COUNT}"
+                        f"Task exceeded node budget: {node_count} > {max_node_budget}"
                     )
                 if current_cost > MAX_TASK_RMB_COST:
                     raise RuntimeError(
@@ -284,6 +325,7 @@ async def run_research_job(
                     completed_at=None,
                     checkpoint_node=node_name,
                     interruption_state="running",
+                    architecture_mode=architecture_mode,
                 )
 
         if not merged_state:
@@ -296,6 +338,10 @@ async def run_research_job(
         retrieval_failed = bool(merged_state.get("retrieval_failed"))
         final_status = "FAILED" if (backend == "drb_public_benchmark" and retrieval_failed) else "SUCCESS"
         final_detail = "证据获取不足，未进入正式写作阶段" if retrieval_failed else "研究任务已完成"
+        final_checkpoint_node = (
+            str((merged_state.get("progress_ledger") or {}).get("last_team_called") or "").replace(" ", "_").lower()
+            or ("executor" if retrieval_failed else "writer")
+        )
 
         if not disable_cache and not retrieval_failed:
             cache_report(
@@ -328,8 +374,9 @@ async def run_research_job(
             resumed_from_checkpoint=resume_from_checkpoint,
             started_at=started_at,
             completed_at=int(time.time()),
-            checkpoint_node="executor" if retrieval_failed else "writer",
+            checkpoint_node=final_checkpoint_node,
             interruption_state="completed",
+            architecture_mode=architecture_mode,
             report=report,
         )
         return enrich_cost_fields(
@@ -339,6 +386,7 @@ async def run_research_job(
                 "status": final_status,
                 "report": report,
                 "research_mode": research_mode,
+                "architecture_mode": architecture_mode,
                 "llm_cost_rmb": global_cost_tracker.total_cost_rmb,
                 "external_cost_usd_est": external_costs["external_cost_usd_est"],
                 "serper_queries": external_costs["serper_queries"],
@@ -347,13 +395,21 @@ async def run_research_job(
                 "tavily_cost_usd_est": external_costs["tavily_cost_usd_est"],
                 "retrieval_metrics": retrieval_metrics,
                 "task_contract": dict(merged_state.get("task_contract") or {}),
+                "task_ledger": dict(merged_state.get("task_ledger") or {}),
+                "progress_ledger": dict(merged_state.get("progress_ledger") or {}),
                 "evidence_slots": dict(merged_state.get("evidence_slots") or {}),
                 "draft_audit": dict(merged_state.get("draft_audit") or {}),
+                "research_team_result": dict(merged_state.get("research_team_result") or {}),
+                "writer_team_result": dict(merged_state.get("writer_team_result") or {}),
+                "team_route_trace": list(merged_state.get("team_route_trace") or []),
                 "source_candidates": list(merged_state.get("source_candidates") or []),
                 "fetch_results": list(merged_state.get("fetch_results") or []),
                 "coverage_summary": dict(merged_state.get("coverage_summary") or {}),
                 "backfill_attempts": int(merged_state.get("backfill_attempts") or 0),
                 "retrieval_failed": retrieval_failed,
+                "bundle_ref": str(merged_state.get("bundle_ref") or ""),
+                "draft_ref": str(merged_state.get("draft_ref") or ""),
+                "current_phase": str(merged_state.get("current_phase") or ""),
                 "node_count": node_count,
                 "elapsed_seconds": elapsed,
                 "attempt_count": attempt_count,
@@ -381,6 +437,7 @@ async def run_research_job(
             completed_at=int(time.time()),
             checkpoint_node=(get_task(task_id) or {}).get("last_checkpoint_node"),
             interruption_state="failed",
+            architecture_mode=architecture_mode,
             last_error=repr(exc),
         )
         raise
@@ -395,6 +452,7 @@ def run_research_job_sync(
     *,
     backend: str,
     research_mode: str,
+    architecture_mode: str | None = None,
     disable_cache: bool = False,
     resume_from_checkpoint: bool = False,
 ) -> dict[str, Any]:
@@ -404,6 +462,7 @@ def run_research_job_sync(
             query,
             backend=backend,
             research_mode=research_mode,
+            architecture_mode=architecture_mode,
             disable_cache=disable_cache,
             resume_from_checkpoint=resume_from_checkpoint,
         )

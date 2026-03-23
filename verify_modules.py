@@ -112,7 +112,16 @@ async def run_all_checks():
         check("Writer graph compiled", writer_app is not None)
         check("Planner node async", inspect.iscoroutinefunction(node_init_search))
         check("Conflict router", router_conflict({"conflict_detected": True, "conflict_count": 1}) == "planner")
-        check("Writer router", continue_to_writers({"outline": [{"id": "1"}], "iteration": 0, "user_feedback": ""}) == "chart_scout")
+        writer_route = continue_to_writers(
+            {
+                "outline": [{"id": "1", "title": "Section", "description": "desc"}],
+                "iteration": 0,
+                "user_feedback": "",
+                "task_contract": {"must_answer_points": []},
+                "required_analysis_modes": [],
+            }
+        )
+        check("Writer router", isinstance(writer_route, list) and bool(writer_route) and writer_route[0].get("node") == "section_writer")
     except Exception as exc:
         check("graph import", False, str(exc))
 

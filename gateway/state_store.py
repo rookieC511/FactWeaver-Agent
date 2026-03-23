@@ -6,7 +6,7 @@ import time
 from contextlib import contextmanager
 from typing import Any
 
-from core.config import DEFAULT_RESEARCH_MODE, REDIS_BROKER_URL, SEMANTIC_CACHE_TTL_SECONDS, STATE_DB_PATH
+from core.config import DEFAULT_ARCHITECTURE_MODE, DEFAULT_RESEARCH_MODE, REDIS_BROKER_URL, SEMANTIC_CACHE_TTL_SECONDS, STATE_DB_PATH
 
 
 @contextmanager
@@ -70,6 +70,7 @@ def init_state_store() -> None:
                 "publish_attempt_count": "INTEGER DEFAULT 0",
                 "publish_last_error": "TEXT",
                 "queued_at": "REAL",
+                "architecture_mode": "TEXT DEFAULT 'supervisor_team'",
             },
         )
         conn.execute(
@@ -195,6 +196,7 @@ def upsert_task(
     publish_attempt_count: int | None = None,
     publish_last_error: str | None = None,
     queued_at: float | None = None,
+    architecture_mode: str | None = DEFAULT_ARCHITECTURE_MODE,
 ) -> None:
     now = _now_ts()
     with _connect() as conn:
@@ -209,8 +211,9 @@ def upsert_task(
                 started_at, completed_at, last_checkpoint_id, last_checkpoint_ns,
                 last_checkpoint_node, interruption_state, last_km_snapshot_id,
                 publish_status, publish_attempt_count, publish_last_error, queued_at
+                , architecture_mode
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(task_id) DO UPDATE SET
                 query = excluded.query,
                 status = excluded.status,
@@ -242,7 +245,8 @@ def upsert_task(
                 publish_status = COALESCE(excluded.publish_status, tasks.publish_status),
                 publish_attempt_count = COALESCE(excluded.publish_attempt_count, tasks.publish_attempt_count),
                 publish_last_error = COALESCE(excluded.publish_last_error, tasks.publish_last_error),
-                queued_at = COALESCE(excluded.queued_at, tasks.queued_at)
+                queued_at = COALESCE(excluded.queued_at, tasks.queued_at),
+                architecture_mode = COALESCE(excluded.architecture_mode, tasks.architecture_mode)
             """,
             (
                 task_id,
@@ -278,6 +282,7 @@ def upsert_task(
                 publish_attempt_count,
                 publish_last_error,
                 queued_at,
+                architecture_mode,
             ),
         )
 

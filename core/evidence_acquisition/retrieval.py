@@ -56,16 +56,19 @@ async def staged_candidate_recall(
     task_desc: str,
     max_results: int,
     search_fn: SearchFn,
+    primary_query: str | None = None,
+    authority_queries: list[str] | None = None,
+    strict_topic_override: bool | None = None,
 ) -> StagedRecallResult:
     topic_family = infer_topic_family(task_desc or query)
-    strict_topic = topic_requires_authority(topic_family)
-    authority_queries = build_authority_queries(task_desc or query)
+    strict_topic = strict_topic_override if strict_topic_override is not None else topic_requires_authority(topic_family)
+    authority_queries = list(authority_queries or build_authority_queries(task_desc or query))
     search_queries: list[str] = []
     backfill_attempts = 0
 
-    primary_query = authority_queries[0] if strict_topic else query
-    search_queries.append(primary_query)
-    primary_results = await search_fn(primary_query, max_results)
+    initial_query = primary_query or (authority_queries[0] if strict_topic and authority_queries else query)
+    search_queries.append(initial_query)
+    primary_results = await search_fn(initial_query, max_results)
     all_candidates = qualify_search_results(primary_results, task_desc or query, limit=max_results * 2)
 
     admitted = admit_source_candidates(all_candidates, strict_topic=strict_topic, max_main=max_results)

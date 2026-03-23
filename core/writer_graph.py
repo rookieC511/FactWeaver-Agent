@@ -15,7 +15,6 @@ except Exception:  # pragma: no cover - compatibility for lightweight test stubs
         def __init__(self, node: str, arg):
             super().__init__(node=node, arg=arg)
 
-from core.charts import generate_chart
 from core.memory import get_current_km
 from core.models import llm_chief, llm_smart, llm_worker
 from core.tools import LLMFormatError, clean_json_output
@@ -77,6 +76,7 @@ class WriterState(TypedDict):
     task_contract: dict[str, Any]
     evidence_slots: dict[str, Any]
     draft_audit: dict[str, Any]
+    report_verifier: dict[str, Any]
     audit_revision_count: int
     required_analysis_modes: list[str]
 
@@ -351,61 +351,6 @@ def human_review_node(state: WriterState):
     return {"user_feedback": ""}
 
 
-async def chart_scout_node(state: WriterState):
-    km = get_current_km()
-    docs = km.retrieve(k=8)
-    context_str = "\n".join(doc.page_content[:200] for doc in docs)
-    prompt = f"""
-Given the outline and evidence below, decide whether 0-2 charts would materially improve the report.
-
-Return strict JSON:
-{{
-  "charts": [
-    {{
-      "target_section_id": "1",
-      "type": "line",
-      "title": "Chart title",
-      "filename": "chart.png",
-      "data": {{"labels": ["A"], "datasets": [{{"label": "Metric", "data": [1]}}]}}
-    }}
-  ]
-}}
-
-Outline:
-{json.dumps(state['outline'], ensure_ascii=False)}
-
-Evidence preview:
-{context_str}
-"""
-    charts = []
-    try:
-        resp = await llm_smart.ainvoke([HumanMessage(content=prompt)])
-        parsed = clean_json_output(resp.content, strict=True)
-        if isinstance(parsed, dict):
-            charts = parsed.get("charts", [])
-    except Exception:
-        charts = []
-
-    updated_outline = [dict(section) for section in state["outline"]]
-    for chart in charts:
-        try:
-            path = generate_chart(
-                chart_type=chart["type"],
-                data=chart["data"],
-                title=chart["title"],
-                filename=chart["filename"],
-            )
-        except Exception:
-            path = ""
-        if not path:
-            continue
-        relative_path = f"./public/charts/{__import__('os').path.basename(path)}"
-        for section in updated_outline:
-            if section["id"] == chart.get("target_section_id"):
-                section["description"] += f"\n[IMPORTANT] Must embed generated chart: ![{chart['title']}]({relative_path})"
-    return {"outline": updated_outline}
-
-
 async def section_writer_node(state: dict[str, Any]):
     km = get_current_km()
     section_id = state["id"]
@@ -538,6 +483,71 @@ Requirements:
     return {"final_doc": final_doc}
 
 
+async def report_verifier_node(state: WriterState):
+    audit = state.get("draft_audit") or {}
+    prompt = f"""
+You are the Report Verifier Agent.
+
+Review the final report and return strict JSON:
+{{
+  "answer_coverage": "pass|needs_improvement|insufficient_evidence",
+  "citation_support": "pass|needs_improvement|insufficient_evidence",
+  "constraint_satisfaction": "pass|needs_improvement|insufficient_evidence",
+  "analysis_gap": "pass|needs_improvement|insufficient_evidence",
+  "should_revise": true,
+  "needs_research_backfill": false,
+  "should_degrade": false,
+  "reason": "short explanation"
+}}
+
+Rules:
+- Only decide whether one more revise should happen.
+- If the report lacks evidence and cannot be fixed by style/editing alone, set needs_research_backfill=true.
+- If the report can only safely ship as a limited answer, set should_degrade=true.
+
+Query:
+{state["query"]}
+
+Task contract:
+{json.dumps(state.get("task_contract") or {}, ensure_ascii=False)}
+
+Code audit:
+{json.dumps(audit, ensure_ascii=False)}
+
+Final report:
+{state.get("final_doc", "")}
+"""
+    fallback = {
+        "answer_coverage": "needs_improvement" if audit.get("missing_requirements") else "pass",
+        "citation_support": "needs_improvement" if not audit.get("direct_answer_citation_backed") else "pass",
+        "constraint_satisfaction": "needs_improvement" if audit.get("task_clause_coverage_rate", 0.0) < 1.0 else "pass",
+        "analysis_gap": "needs_improvement" if audit.get("analysis_signal_count", 0) < 2 else "pass",
+        "should_revise": bool(audit.get("missing_requirements")) and int(state.get("audit_revision_count", 0)) < 1,
+        "needs_research_backfill": "evidence_slots_not_grounded" in list(audit.get("missing_requirements") or []),
+        "should_degrade": bool(audit.get("missing_requirements")) and "evidence_slots_not_grounded" in list(audit.get("missing_requirements") or []),
+        "reason": "Fallback verifier derived decision from deterministic audit.",
+    }
+    try:
+        resp = await llm_smart.ainvoke([HumanMessage(content=prompt)])
+        parsed = clean_json_output(resp.content, strict=True)
+        if isinstance(parsed, dict):
+            fallback.update(
+                {
+                    "answer_coverage": str(parsed.get("answer_coverage") or fallback["answer_coverage"]),
+                    "citation_support": str(parsed.get("citation_support") or fallback["citation_support"]),
+                    "constraint_satisfaction": str(parsed.get("constraint_satisfaction") or fallback["constraint_satisfaction"]),
+                    "analysis_gap": str(parsed.get("analysis_gap") or fallback["analysis_gap"]),
+                    "should_revise": bool(parsed.get("should_revise")) and int(state.get("audit_revision_count", 0)) < 1,
+                    "needs_research_backfill": bool(parsed.get("needs_research_backfill")),
+                    "should_degrade": bool(parsed.get("should_degrade")),
+                    "reason": str(parsed.get("reason") or fallback["reason"]),
+                }
+            )
+    except Exception:
+        pass
+    return {"report_verifier": fallback}
+
+
 def draft_audit_node(state: WriterState):
     audit = audit_final_doc(
         state.get("final_doc", ""),
@@ -601,7 +611,7 @@ def continue_to_writers(state: WriterState):
         return "skeleton_generator"
     if state.get("user_feedback") and not state["outline"]:
         return "skeleton_generator"
-    return "chart_scout"
+    return map_to_writers(state)
 
 
 def map_to_writers(state: WriterState):
@@ -612,33 +622,37 @@ def map_to_writers(state: WriterState):
         points_by_section.setdefault(section_id, []).append(str(point.get("question") or ""))
     return [
         Send(
-            "section_writer",
-            {
-                **item,
-                "direct_question": task_contract.get("direct_question", state["query"]),
-                "must_answer_points": points_by_section.get(item["id"], []),
-                "required_analysis_modes": state.get("required_analysis_modes") or [],
-                "writer_context_mode": state.get("writer_context_mode"),
-            },
+                "section_writer",
+                {
+                    **item,
+                    "direct_question": task_contract.get("direct_question", state.get("query", "")),
+                    "must_answer_points": points_by_section.get(item["id"], []),
+                    "required_analysis_modes": state.get("required_analysis_modes") or [],
+                    "writer_context_mode": state.get("writer_context_mode"),
+                },
         )
         for item in state["outline"]
     ]
 
 
 def route_after_audit(state: WriterState):
-    audit = state.get("draft_audit") or {}
-    if audit.get("passed") or int(state.get("audit_revision_count", 0)) >= 1:
-        return END
-    return "revision"
+    return "report_verifier"
+
+
+def route_after_verifier(state: WriterState):
+    verifier = state.get("report_verifier") or {}
+    if verifier.get("should_revise") and int(state.get("audit_revision_count", 0)) < 1:
+        return "revision"
+    return END
 
 
 writer_workflow = StateGraph(WriterState)
 writer_workflow.add_node("skeleton_generator", skeleton_node)
 writer_workflow.add_node("human_review", human_review_node)
-writer_workflow.add_node("chart_scout", chart_scout_node)
 writer_workflow.add_node("section_writer", section_writer_node)
 writer_workflow.add_node("editor", editor_node)
 writer_workflow.add_node("draft_audit", draft_audit_node)
+writer_workflow.add_node("report_verifier", report_verifier_node)
 writer_workflow.add_node("revision", revision_node)
 
 writer_workflow.set_entry_point("skeleton_generator")
@@ -646,12 +660,12 @@ writer_workflow.add_edge("skeleton_generator", "human_review")
 writer_workflow.add_conditional_edges(
     "human_review",
     continue_to_writers,
-    ["chart_scout", "skeleton_generator"],
+    ["section_writer", "skeleton_generator"],
 )
-writer_workflow.add_conditional_edges("chart_scout", map_to_writers, ["section_writer"])
 writer_workflow.add_edge("section_writer", "editor")
 writer_workflow.add_edge("editor", "draft_audit")
-writer_workflow.add_conditional_edges("draft_audit", route_after_audit, ["revision", END])
+writer_workflow.add_conditional_edges("draft_audit", route_after_audit, ["report_verifier", END])
+writer_workflow.add_conditional_edges("report_verifier", route_after_verifier, ["revision", END])
 writer_workflow.add_edge("revision", "draft_audit")
 
 if get_sqlite_checkpointer and CHECKPOINT_DB_PATH:

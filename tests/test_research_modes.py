@@ -13,6 +13,7 @@ def _base_state(mode: str) -> dict:
     return {
         "query": "test query",
         "task_id": f"task-{mode}",
+        "architecture_mode": "legacy_workflow",
         "plan": [{"task": "test query section", "section_id": "1"}],
         "outline": [],
         "user_feedback": "",

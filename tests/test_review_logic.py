@@ -55,14 +55,16 @@ class TestReviewInteraction(unittest.TestCase):
         print("✅ node confirmed approval")
         
         # Test routing
-        # Empty feedback + existing outline -> chart_scout
+        # Empty feedback + existing outline -> section writers
         # We need to simulate the state that 'continue_to_writers' sees.
         # human_review returns partial update. The graph merges it.
         # So full state would serve outline intact.
         full_state_simulated = {**state, **result} 
         next_step = continue_to_writers(full_state_simulated)
-        self.assertEqual(next_step, "chart_scout")
-        print("✅ routing logic confirms proceed to scout")
+        self.assertIsInstance(next_step, list)
+        self.assertTrue(next_step)
+        self.assertEqual(next_step[0].node, "section_writer")
+        print("✅ routing logic confirms proceed to section writers")
 
 if __name__ == '__main__':
     unittest.main()

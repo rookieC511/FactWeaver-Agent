@@ -307,3 +307,7 @@ pytest tests/test_writer_graph.py -q
   - `retrieval_failed`
   - `authority_source_rate`
   - `weak_source_hit_rate`
+
+## 开源协议
+
+本项目采用 `MIT License` 开源协议。详情见：[LICENSE](LICENSE)
